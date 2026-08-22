@@ -1,0 +1,78 @@
+name: CI
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - name: Check for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+
+  test-security:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: e0db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d e0db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      # GitHub Actions `services:` containers don't support mounting local
+      # files as docker-entrypoint-initdb.d, unlike local `docker compose up`
+      # (see infra/docker/docker-compose.yml) -- so roles/schema/RLS/seed
+      # data are applied explicitly here instead. See
+      # docs/architecture/decisions.md (ADR-015).
+      - name: Apply DB migrations (roles, schema, RLS, seed)
+        run: node infra/postgres/migrate.js
+        env:
+          DATABASE_ADMIN_URL: postgresql://postgres:postgres_dev@localhost:5432/e0db
+      - run: npm run test:security
+        env:
+          DATABASE_URL: postgresql://app_user:app_dev_pass_local@localhost:5432/e0db
+          DATABASE_MIGRATION_URL: postgresql://migration_user:migration_dev_pass_local@localhost:5432/e0db
+          NODE_ENV: test

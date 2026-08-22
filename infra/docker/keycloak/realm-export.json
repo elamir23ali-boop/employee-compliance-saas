@@ -1,0 +1,162 @@
+{
+  "realm": "e0-test",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 300,
+  "organizationsEnabled": true,
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyDigits": 6,
+  "otpPolicyPeriod": 30,
+  "otpPolicyLookAheadWindow": 1,
+  "roles": {
+    "realm": [
+      { "name": "platform-admin", "description": "E0 test role: platform-admin" },
+      { "name": "tenant-admin", "description": "E0 test role: tenant-admin" },
+      { "name": "hr-manager", "description": "E0 test role: hr-manager" },
+      { "name": "hr-staff", "description": "E0 test role: hr-staff" },
+      { "name": "viewer", "description": "E0 test role: viewer" }
+    ]
+  },
+  "organizations": [
+    {
+      "name": "org-tenant-a",
+      "alias": "org-tenant-a",
+      "enabled": true,
+      "domains": [ { "name": "org-tenant-a.e0.local", "verified": false } ]
+    },
+    {
+      "name": "org-tenant-b",
+      "alias": "org-tenant-b",
+      "enabled": true,
+      "domains": [ { "name": "org-tenant-b.e0.local", "verified": false } ]
+    },
+    {
+      "name": "org-tenant-c",
+      "alias": "org-tenant-c",
+      "enabled": true,
+      "domains": [ { "name": "org-tenant-c.e0.local", "verified": false } ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "e0-api",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "implicitFlowEnabled": false,
+      "redirectUris": [ "http://localhost:3000/*" ],
+      "webOrigins": [ "+" ],
+      "protocolMappers": [
+        {
+          "name": "org_slug",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "org_slug",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "org_slug",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "audience-e0-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "e0-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin_tenant_a@e0.local",
+      "email": "admin_tenant_a@e0.local",
+      "firstName": "Admin",
+      "lastName": "TenantA",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": { "org_slug": [ "org-tenant-a" ] },
+      "realmRoles": [ "tenant-admin" ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "TestPass123!",
+          "temporary": false
+        },
+        {
+          "type": "otp",
+          "credentialData": "{\"subType\":\"totp\",\"digits\":6,\"counter\":0,\"period\":30,\"algorithm\":\"HmacSHA1\"}",
+          "secretData": "{\"value\":\"JBSWY3DPEHPK3PXP\"}"
+        }
+      ]
+    },
+    {
+      "username": "viewer_tenant_b@e0.local",
+      "email": "viewer_tenant_b@e0.local",
+      "firstName": "Viewer",
+      "lastName": "TenantB",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": { "org_slug": [ "org-tenant-b" ] },
+      "realmRoles": [ "viewer" ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "TestPass123!",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "hr_staff_tenant_a@e0.local",
+      "email": "hr_staff_tenant_a@e0.local",
+      "firstName": "HrStaff",
+      "lastName": "TenantA",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": { "org_slug": [ "org-tenant-a" ] },
+      "realmRoles": [ "hr-staff" ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "TestPass123!",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "disabled_user@e0.local",
+      "email": "disabled_user@e0.local",
+      "firstName": "Disabled",
+      "lastName": "User",
+      "enabled": false,
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": { "org_slug": [ "org-tenant-a" ] },
+      "realmRoles": [ "hr-staff" ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "TestPass123!",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

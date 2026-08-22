@@ -1,0 +1,39 @@
+{
+  "name": "@ecs/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Employee Compliance SaaS — NestJS API",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "nest build",
+    "dev": "nest start --watch",
+    "start": "nest start",
+    "start:prod": "node dist/main.js",
+    "lint": "eslint \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@ecs/database": "*",
+    "@ecs/shared": "*",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "drizzle-orm": "^0.45.2",
+    "jose": "^5.9.6",
+    "pg": "^8.13.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/testing": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.11.10",
+    "drizzle-kit": "^0.31.10",
+    "typescript": "^5.7.2"
+  }
+}

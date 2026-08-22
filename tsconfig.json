@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "noEmit": true
+  },
+  "include": ["tests/**/*.ts"],
+  "exclude": ["node_modules", "apps", "packages"]
+}

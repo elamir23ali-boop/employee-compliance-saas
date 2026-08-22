@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env.local
+.env.*.local
+*.env
+!.env.example
+.turbo/
+coverage/
+test-results/
+*.log
+.DS_Store
+Thumbs.db
+tests/support/.totp-state.json

@@ -1,0 +1,11 @@
+## E1: overrides for a disposable test stack (e.g. local integration test runs
+## outside CI). Same images/config as docker-compose.yml, with an ephemeral
+## (non-persistent) Postgres volume so each run starts from a clean database.
+##
+## Usage: docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml up -d
+services:
+  postgres:
+    volumes:
+      - ../postgres/init:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /var/lib/postgresql

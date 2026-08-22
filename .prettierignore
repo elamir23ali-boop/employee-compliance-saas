@@ -1,0 +1,10 @@
+dist/
+node_modules/
+coverage/
+.turbo/
+test-results/
+
+# Verbatim copies of the E0 historical record / Keycloak import config --
+# left byte-identical to their E0 source rather than reformatted.
+docs/e0/
+infra/docker/keycloak/realm-export.json

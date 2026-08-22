@@ -1,0 +1,252 @@
+# Architecture Decision Log
+
+Chronological record of every deviation from, clarification of, or addition to
+CLAUDE.md/the task spec, for both E0 and E1. Per the Security Gates rule,
+anything touching RLS, auth, or tenant isolation is documented here before
+implementation.
+
+## ADR-001: Postgres 18 data directory convention
+
+Date: E0
+Status: ACCEPTED
+Context: `postgres:18-alpine` refuses to start with a volume mounted at
+`/var/lib/postgresql/data` (its pre-18 convention) -- 18+ expects a single
+mount at `/var/lib/postgresql` and places data in a major-version
+subdirectory.
+Decision: `docker-compose.yml` mounts the named volume at `/var/lib/postgresql`.
+Consequences: Pure Docker plumbing, no behavioral change.
+
+## ADR-002: `migration_user` needs `CREATE` on `public`
+
+Date: E0
+Status: ACCEPTED
+Context: Postgres 15+ revokes `CREATE` on the `public` schema from `PUBLIC` by default.
+Decision: `001_roles.sql` explicitly grants `USAGE, CREATE ON SCHEMA public TO
+migration_user` (and `USAGE` to `app_user`) so `002_schema.sql`'s
+`SET ROLE migration_user; CREATE TABLE ...` succeeds.
+Consequences: migration_user ends up owning the tables, per spec.
+
+## ADR-003: RLS policy NULLIF guard against the `''` vs `NULL` gap
+
+Date: E0
+Status: ACCEPTED
+Context: Empirically verified against Postgres 18: a custom placeholder GUC
+(`app.current_tenant_id`) set via `SELECT set_config(name, value, true)`
+(`SET LOCAL` semantics) with no prior session-level value reverts to `''`
+(empty string) on COMMIT, not `NULL`. A bare `current_setting(...) IS NOT
+NULL` guard lets `''` through, and the subsequent `::uuid` cast then throws
+instead of the query cleanly returning zero rows. Fail-closed either way --
+no tenant's data is ever returned; this is a robustness gap, not a
+cross-tenant leak or "context leaks between requests" stop condition.
+Decision: Wrap `current_setting(...)` in `NULLIF(..., '')` in both the `IS
+NOT NULL` guard and the cast, in all three RLS policies (`003_rls.sql`).
+Consequences: `''` and true `NULL` behave identically -- 0 rows, no error, in
+both "never set" and "reset after commit" cases. Strict robustness
+improvement; does not weaken the tenant-match requirement. In practice this
+edge case never reaches application code, since every transaction that
+touches RLS-protected tables sets tenant context as its first statement.
+
+## ADR-004: Keycloak OTP secret is raw UTF-8 bytes, not Base32-decoded
+
+Date: E0
+Status: ACCEPTED
+Context: Empirically verified against Keycloak 26.7.2: `OTPCredentialModel`
+does not Base32-decode the stored `secretData.value` before using it as the
+HMAC-SHA1 key -- it uses the secret string's raw UTF-8 bytes directly. This
+differs from the RFC 6238 reference behavior most TOTP libraries assume.
+Decision: `tests/support/totp.ts` and `tests/load/baseline.js` both implement
+raw-bytes HMAC keying to match.
+Consequences: Only affects test/load-test tooling that mints tokens
+programmatically; has no bearing on `apps/api/src/auth/jwt.strategy.ts`,
+which only verifies already-issued JWTs.
+
+## ADR-005: Keycloak single-use TOTP codes
+
+Date: E0
+Status: ACCEPTED
+Context: Keycloak rejects a TOTP code already consumed within its 30-second
+window, even across independent logins.
+Decision: `tests/support/totp.ts` exports `nextTotp()`, which tracks the last
+consumed window (persisted to `tests/support/.totp-state.json`, gitignored)
+and waits for the next window if the current one was already used.
+`tests/load/baseline.js` uses a bounded retry-with-30s-sleep for the same
+reason.
+Consequences: Auth/pooling test suites can take up to ~30s longer than
+expected when consecutive TOTP logins land in the same window.
+
+## ADR-006: Keycloak default User Profile requires firstName/lastName
+
+Date: E0
+Status: ACCEPTED
+Context: With no `firstName`/`lastName` set, direct-grant login fails with
+`invalid_grant` regardless of `requiredActions`/`emailVerified` -- Keycloak
+26's default declarative User Profile enforces this dynamically at login.
+Decision: `infra/docker/keycloak/realm-export.json` sets synthetic
+`firstName`/`lastName` for all 4 test users.
+
+## ADR-007: Keycloak token endpoint returns 400, not 401, for invalid_grant
+
+Date: E0
+Status: ACCEPTED
+Context: Per OAuth2 (RFC 6749 §5.2), the token endpoint returns 400 with
+`{"error": "invalid_grant"}` for bad credentials / disabled accounts -- never
+401 (401 is reserved for the resource server, i.e. our own API, rejecting a
+bad _token_).
+Decision: `tests/integration/keycloak.test.ts` asserts 400 + `invalid_grant`
+for KC-02/KC-05, matching real Keycloak/OAuth2 behavior.
+
+## ADR-008: Keycloak issuer (`iss`) reflects the request's Host header
+
+Date: E0
+Status: ACCEPTED
+Context: By default, Keycloak dev-mode's `iss` claim reflects whatever Host
+header reached it. A token requested via `host.docker.internal:8080` would
+carry a different `iss` than `KEYCLOAK_ISSUER`, causing an otherwise-valid
+token to be rejected -- correctly, since accepting a token whose issuer
+doesn't match a fixed configured issuer would be an issuer-confusion
+vulnerability.
+Decision: Pin Keycloak's effective issuer with `KC_HOSTNAME=localhost` /
+`KC_HOSTNAME_STRICT=false` in `infra/docker/docker-compose.yml`.
+
+## ADR-009: TenantMiddleware is a Guard, not Express middleware
+
+Date: E0
+Status: ACCEPTED
+Context: The mandated flow is `AuthGuard -> Organization Extractor -> Tenant
+Resolver -> ...`, strictly in that order. NestJS runs all middleware before
+any guard regardless of registration order, which would break this ordering
+if tenant resolution were real `NestMiddleware` -- it would run before the
+JWT was verified.
+Decision: `apps/api/src/tenant/tenant.middleware.ts` implements `CanActivate`
+and is applied via `@UseGuards(AuthGuard, TenantMiddleware, RbacGuard)`,
+which Nest executes strictly in array order. `tenant.resolver.ts` holds the
+DB lookup and is unaffected.
+
+## ADR-010: PerfController's raw-query endpoint deliberately uses migration_user
+
+Date: E0
+Status: ACCEPTED
+Context: Measuring RLS overhead (PERF-01 vs PERF-02) requires a query that
+bypasses RLS entirely.
+Decision: `GET /api/v1/perf/raw-query` is the one sanctioned exception to
+"never use migration_user in application code." Hard-gated to
+`NODE_ENV=test` (403 otherwise), reachable by no other code path.
+
+## ADR-011: Files added beyond the literal spec'd directory tree
+
+Date: E0
+Status: ACCEPTED
+Context: `rbac/rbac.module.ts`, `rbac/test.controller.ts`, `perf/perf.module.ts`,
+and shared test helpers weren't named in the original file tree, but are
+required to satisfy explicit requirements elsewhere in the spec.
+Decision: Kept, as no scope beyond what's explicitly required was added.
+
+## ADR-012: Migrations run via SQL init files, not drizzle-kit push/migrate
+
+Date: E0
+Status: ACCEPTED
+Context: `002_schema.sql` (executed by migration_user at container init) is
+the schema's source of truth.
+Decision: `packages/database/src/schema.ts` mirrors it for type-safe Drizzle
+queries; `apps/api/drizzle.config.ts` exists only so drizzle-kit can
+introspect/typecheck during development. No `drizzle-kit push`/`migrate` is
+ever run against the database.
+
+---
+
+## ADR-013: RBAC role hierarchy centralized in @ecs/shared
+
+Date: E1
+Status: ACCEPTED
+Context: E0's `rbac.guard.ts` duplicated the role ordering as a local
+`HIERARCHY` array (`indexOf`-based comparison). E1 introduces
+`packages/shared` as the canonical home for cross-app constants.
+Decision: Moved the role hierarchy into `packages/shared/src/constants/roles.constants.ts`
+as `ROLE_HIERARCHY` (a `Record<Role, number>`, 1=viewer..5=platform-admin).
+`apps/api/src/rbac/rbac.guard.ts` now compares numeric levels from
+`ROLE_HIERARCHY` instead of array `indexOf`.
+Consequences: Verified equivalent security semantics to E0: an unrecognized
+role still evaluates to the lowest possible level (0, via `?? 0`) and is
+rejected exactly as `indexOf(...) === -1` was in E0. This is a refactor only
+-- no change to which roles can access which endpoints.
+
+## ADR-014: ESLint flat config instead of `.eslintrc.js`
+
+Date: E1
+Status: ACCEPTED
+Context: `eslint@latest` resolves to ESLint 9+, whose default config format is
+flat config; `.eslintrc.js` requires opting back into the legacy system
+(removed entirely in ESLint 10).
+Decision: `eslint.config.mjs` at the repo root, using `typescript-eslint`'s
+strict+stylistic configs, `eslint-plugin-security`, and
+`eslint-config-prettier` for Prettier integration -- same intent as
+originally specified, different (more future-proof) mechanism.
+
+## ADR-015: CI test-security job applies migrations explicitly
+
+Date: E1
+Status: ACCEPTED
+Context: Local dev (`infra/docker/docker-compose.yml`) mounts
+`infra/postgres/init` as `docker-entrypoint-initdb.d`, which Postgres runs
+automatically on first boot of an empty volume. GitHub Actions `services:`
+containers don't support mounting local repo files this way, so a bare
+`postgres:18-alpine` service starts with no roles/schema/RLS/seed data at all.
+Decision: Added `infra/postgres/migrate.js` (superuser-only, never
+app_user/migration_user) that applies `packages/database/migrations/*.sql`
+in order, and a step in `.github/workflows/ci.yml`'s `test-security` job that
+runs it before `npm run test:security`. Also scoped
+`.github/workflows/security.yml`'s `dependency-review` job to
+`pull_request` events only, since `dependency-review-action` diffs a base
+against a head ref and has nothing to compare on `schedule`/`push`.
+
+## ADR-016: BullMQ workers extracted into a standalone apps/worker process
+
+Date: E1
+Status: ACCEPTED
+Context: E0's workers ran inside the same NestJS process as the API
+(`app/src/workers/`), via `WorkersModule`. E1's monorepo structure specifies
+`apps/worker` as a separate process.
+Decision: `createReminderWorker`/`createImportWorker` now take a Drizzle
+`Database` handle directly (from `@ecs/database`) instead of NestJS's
+`DrizzleService`, since the worker process has no Nest DI container.
+`apps/worker/src/main.ts` constructs its own pool/db (app_user only) and
+Redis connection, and handles `SIGTERM`/`SIGINT` for graceful shutdown.
+Consequences: `apps/api/src/app.module.ts` no longer imports `WorkersModule`.
+Job schemas, tenant-context-per-transaction, and idempotency-key
+deduplication logic are otherwise unchanged from E0.
+
+## ADR-019: drizzle-orm, drizzle-kit, and vitest bumped for CVE fixes
+
+Date: E1
+Status: ACCEPTED
+Context: `npm install` with the originally-pinned versions (drizzle-orm
+^0.36.4, vitest ^2.1.8) surfaced 1 critical (vitest <3.2.6, arbitrary file
+read/execute via the Vitest UI server, GHSA-5xrq-8626-4rwp), 2 high
+(drizzle-orm <0.45.2 SQL injection via improperly escaped identifiers,
+GHSA-gpj5-g38j-94v9; vite <=6.4.2 path-traversal, GHSA-fx2h-pf6j-xcff, pulled
+in transitively by vitest), and 6 moderate `npm audit` findings. The E1 spec
+requires `npm audit` to pass with zero high/critical before the first commit.
+Decision: Bumped `drizzle-orm` to `^0.45.2` (root, `apps/api`, `apps/worker`,
+`packages/database`), `drizzle-kit` to `^0.31.10` (`apps/api`, dev-only), and
+`vitest` to `^4.1.11` (root). Re-ran `npm audit --audit-level=high` (the same
+gate CI uses) after the bump: exit 0, zero high/critical.
+Consequences: 4 moderate findings remain, all from `drizzle-kit`'s
+transitive `@esbuild-kit/*` dependency (esbuild dev-server request
+smuggling, GHSA-67mh-4wv8-2f99). `drizzle-kit` is dev-tooling only --
+used solely by `apps/api/drizzle.config.ts` for local schema
+introspection/typecheck (ADR-012), never invoked in CI or at runtime -- so
+this is accepted as a documented residual risk rather than force-downgrading
+`drizzle-kit` (npm's suggested "fix" for it is actually a downgrade to
+0.18.1, which is not a real fix). Revisit when `drizzle-kit` ships a release
+off the vulnerable esbuild-kit chain.
+
+## ADR-017: packages/database exports a shared `createDb()` connection factory
+
+Date: E1
+Status: ACCEPTED
+Context: Both `apps/api`'s `DrizzleService` and `apps/worker`'s `main.ts` need
+to construct a `pg.Pool` + Drizzle instance from a connection string.
+Decision: `packages/database/src/index.ts` exports `createDb(config: PoolConfig)`,
+so there is exactly one place that owns "how we connect to Postgres with
+Drizzle." Callers still supply their own credentials -- this never assumes
+app_user vs. migration_user.

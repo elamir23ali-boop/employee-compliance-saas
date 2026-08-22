@@ -1,0 +1,31 @@
+name: Security Scan
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Every Monday 6am
+  push:
+    branches: [main]
+
+jobs:
+  dependency-review:
+    # dependency-review-action compares a base ref against a head ref, so it
+    # is only meaningful on pull_request events; on `schedule`/`push` (this
+    # workflow's triggers) there is no base to diff against. Kept non-fatal
+    # here rather than removed, since a future PR-triggered run of this same
+    # workflow file would make it meaningful. See docs/architecture/decisions.md (ADR-015).
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm audit --audit-level=moderate
