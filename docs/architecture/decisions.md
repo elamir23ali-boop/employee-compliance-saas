@@ -250,3 +250,186 @@ Decision: `packages/database/src/index.ts` exports `createDb(config: PoolConfig)
 so there is exactly one place that owns "how we connect to Postgres with
 Drizzle." Callers still supply their own credentials -- this never assumes
 app_user vs. migration_user.
+
+---
+
+## ADR-020: Audit-write transaction consistency — SAVEPOINT pattern
+
+Date: E2
+Status: ACCEPTED
+
+Context: The E2 task spec's Audit Trail phase places two requirements on
+`AuditService.log()` that cannot both hold under plain Postgres transaction
+semantics: (a) it must run "inside the same DB transaction as the business
+operation," and (b) "audit failure must NOT rollback the business
+transaction" (never throw; log and continue). Once *any* statement inside a
+transaction raises a SQL-level error -- e.g. the `audit_events` INSERT trips
+its `outcome` CHECK constraint, a connection blip, disk pressure, anything --
+Postgres marks the whole transaction ABORTED. Every subsequent statement on
+that same transaction, including the business INSERT/UPDATE that already ran
+and the final COMMIT, is then rejected ("current transaction is aborted,
+commands ignored until end of transaction block") regardless of whether the
+JS-level `try/catch` swallows the original error. So a literal reading --
+"insert the audit row inside the caller's `tx`; catch and ignore failures" --
+is not implementable: either the poisoned transaction dooms the business
+write too (violating "must not rollback"), or the audit write has to move
+outside the transaction (breaking "same transaction," and reopening exactly
+the gap that CLAUDE.md's "NEVER skip audit logging for write operations"
+rule exists to close). This is a real architectural contradiction in the
+spec, not an implementation detail -- flagging and resolving it here per the
+Review Gates rule, before writing `audit.service.ts`.
+
+Decision: `AuditService.log()` wraps its INSERT in a Postgres `SAVEPOINT`
+scoped to the caller's transaction:
+1. `SAVEPOINT audit_write`
+2. `INSERT INTO audit_events (...)`
+3. success -> `RELEASE SAVEPOINT audit_write`
+4. failure -> `ROLLBACK TO SAVEPOINT audit_write`, log a structured `ERROR`
+   line with no PII (`action`, `entityType`, `entityId` first 8 chars,
+   `tenantId` first 8 chars, `outcome`, error message only), and return
+   normally -- never re-throws into the caller.
+
+The audit write stays inside the same outer transaction as the business
+operation, so on the success path (the overwhelming majority of calls) the
+audit row and the business row commit or roll back together, atomically --
+which is what "same transaction" is actually for. On the rare path where the
+audit INSERT itself fails, the SAVEPOINT contains the damage: rolling back to
+it clears the aborted state on just that sub-scope, so the outer transaction
+is healthy again and the business operation's own statements can still
+commit normally. This is the standard Postgres idiom for "a step that must
+not be allowed to poison an outer transaction."
+
+Consequences:
+- Business integrity: never blocked or rolled back by an audit-only failure
+  -- satisfies "audit failure must NOT rollback business transaction"
+  literally (at the Postgres transaction-state level), not just via a JS
+  `try/catch` that turns out not to matter.
+- Audit integrity: atomic with the business write on the success path (no
+  separate-transaction gap between "business committed" and "audit
+  durable"); best-effort (loudly logged, not silently dropped) on the one
+  failure mode -- the audit INSERT itself erroring -- that is mathematically
+  impossible to reconcile with "must not roll back the business op." This is
+  a deliberate, documented weakening of "NEVER skip audit logging," not a
+  silent one: every audit-write failure is logged at ERROR level with enough
+  context (action/entityType/entityId prefix/tenantId prefix/outcome) to be
+  found and reconciled, and the business row's own `version`/timestamps still
+  provide a partial trail even without the `audit_events` row.
+- Residual risk: E2 does not wire alerting on the "audit write failed" log
+  line (no notification/alerting system is in E2's scope). Until that exists,
+  an audit-write failure is discoverable only by log inspection, not
+  proactively paged. Recorded as a known gap for E3, not resolved silently.
+- No new tables, background jobs, or outbox/retry workers introduced --
+  respects E2's explicit scope prohibition on background job scheduling.
+
+Alternatives considered:
+- *Audit as a hard dependency* (audit INSERT fails -> whole tx fails ->
+  business op fails too): rejected -- directly violates the spec's explicit
+  "must NOT rollback" requirement.
+- *Audit in a separate transaction/connection after business commit*:
+  rejected for E2 -- reintroduces a real gap between business-commit and
+  audit-durability with no async retry mechanism allowed in scope to close
+  it, and loses same-transaction atomicity on the success path for no
+  benefit over the SAVEPOINT approach.
+- *Outbox table + background worker for guaranteed eventual audit delivery*:
+  rejected for E2 -- explicitly out of scope ("Do NOT build: ... Background
+  job scheduling"). Revisit in E3 if audit-write failures prove
+  non-negligible in practice.
+
+## ADR-021: `full_name` retained as a derived column alongside `first_name`/`last_name`
+
+Date: E2
+Status: ACCEPTED
+
+Context: E0's `employees.full_name` is `NOT NULL` and is what E0's RLS/seed
+tests already depend on. The E2 spec's `CreateEmployeeDto` only carries
+`firstName`/`lastName` (no `fullName`), and the E2 migration rules mandate
+additive-only schema changes -- `006_employees_extended.sql` adds
+`first_name`/`last_name` as nullable columns without touching `full_name`.
+Dropping or relaxing `full_name`'s `NOT NULL` would be a legitimate additive
+migration (loosening a constraint breaks nothing) and would let the E2 API
+skip it, but it is unmentioned in the spec and existing E0 seed rows/tests
+already treat `full_name` as the display identity.
+Decision: `EmployeesService.create()` computes `full_name =
+`${firstName} ${lastName}`.trim()` and writes it alongside the new
+`first_name`/`last_name` columns. `full_name` remains the E0-compatible
+display column (still `NOT NULL`, still what `RLS-01` etc. assert against);
+`first_name`/`last_name` are the new authoritative structured fields the E2
+API reads/writes going forward. E0 seed rows keep `full_name` populated with
+`first_name`/`last_name` left `NULL`, which is valid since those columns are
+nullable.
+Consequences: One redundant derived column during the E0->E2 transition
+instead of a breaking schema change to `full_name`'s nullability that the
+spec never asked for. No behavioral risk -- `full_name` is write-only-derived,
+never independently editable via the E2 API.
+
+## ADR-022: Request-ID generation is Express middleware, not a NestJS Interceptor
+
+Date: E2
+Status: ACCEPTED
+
+Context: The E2 spec sketches request-ID generation as
+`apps/api/src/interceptors/request-id.interceptor.ts`. NestJS Interceptors
+only run *after* a route's Guards have already passed (pipeline order:
+Middleware -> Guards -> Interceptors -> Pipes -> Handler). A request rejected
+by `AuthGuard`/`TenantMiddleware`/`RbacGuard` (401/403) would therefore never
+reach an Interceptor, so `HttpExceptionFilter` would have no `requestId` to
+attach to the large majority of error responses -- exactly the responses
+where a correlatable ID matters most for support/debugging. This is the same
+class of pipeline-ordering issue ADR-009 already resolved for
+`TenantMiddleware`, just in the opposite direction (that one needed to run
+*after* a Guard it looks like Express middleware; this one needs to run
+*before every* Guard).
+Decision: `apps/api/src/common/request-id.middleware.ts` implements real
+`NestMiddleware`, applied via `AppModule.configure()` to `'*'` -- runs before
+all Guards, so `requestId`/`correlationId` are always present, including on
+every 400/401/403/404/409/500 response. No `interceptors/` directory was
+created since there's no post-handler response transform in scope for E2.
+Consequences: Purely a request-plumbing/observability decision -- does not
+touch RLS, auth, or tenant-isolation logic. `X-Correlation-ID` is honored
+from the incoming request header if present (for cross-service tracing),
+otherwise generated.
+
+## ADR-023: `test:unit` added to CI; HTTP+Keycloak-dependent tests remain CI-gapped (pre-existing, not E2-introduced)
+
+Date: E2
+Status: ACCEPTED
+
+Context: E2 adds `tests/unit/**` (pure-logic tests: Expiry Engine, AuditService
+with a mocked transaction, EmployeesService with a mocked Drizzle handle --
+no DB, no Keycloak, no running API). `.github/workflows/ci.yml`'s only test
+job (`test-security`) provisions Postgres + Redis but not Keycloak, and never
+boots the API server as a background process. That gap already existed
+before E2: E0's own `tests/security/rbac.test.ts` and
+`tests/integration/keycloak.test.ts` require a live API + Keycloak and are
+not actually exercised by the committed CI config today -- discovered while
+validating E2's own new HTTP-dependent tests (`tests/security/rbac-e2.test.ts`,
+`tests/security/optimistic-locking.test.ts`, all of `tests/integration/`)
+against a local `docker compose` stack, where two real bugs surfaced that a
+CI run would also have caught: (1) `EmployeesService`'s unique-violation
+detection only checked `err.code`, not drizzle-orm's `DrizzleQueryError.cause.code`
+(the actual driver error is wrapped, not thrown directly) -- duplicate
+employee_code was returning 500 instead of 409; (2) E2's own security-suite
+files that create real employees via the API (`optimistic-locking.test.ts`,
+`rbac-e2.test.ts`) were never cleaning them up, which -- because
+`fileParallelism: false` runs every file in `tests/security/**` in one
+process against one database -- silently drifted E0's `rls.test.ts` exact
+row-count assertions (RLS-01 expects 5, RLS-06 expects 15) on every run
+after the first, in CI exactly as much as locally.
+Decision: (1) Fixed both bugs (see `employees.service.ts`'s `isUniqueViolation`,
+and `tests/support/db-cleanup.ts` + `afterAll` hooks in every E2 test file
+that creates real employees). (2) Added a `test-unit` CI job (`.github/workflows/ci.yml`)
+-- cheap, no services required. (3) Did NOT build out Keycloak-in-CI wiring
+for `test-security`/a new `test-integration` job -- that is materially new CI
+infrastructure (GitHub Actions `services:` containers can't mount local files
+the way `docker compose`'s `docker-entrypoint-initdb.d` does, so importing
+`realm-export.json` in CI needs its own solution, mirroring the
+already-solved-differently `infra/postgres/migrate.js` problem from ADR-015),
+which is out of E2's stated scope (four MVP capabilities, not CI
+infrastructure) and predates E2.
+Consequences: `test:unit` is now genuinely CI-verified on every push/PR.
+`test:security`/`test:integration`'s HTTP+Keycloak-dependent tests (both E0's
+and E2's) remain verified only via local `docker compose up` + manually
+running the API/worker processes, exactly as they were before E2 -- not a
+regression, but not fixed either. Recorded here so it isn't mistaken for
+"E2 wired up full CI test coverage" -- it did not. Risk carried into E3 (or a
+dedicated CI-infrastructure task) as a known gap.

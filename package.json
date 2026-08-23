@@ -15,6 +15,7 @@
     "lint": "turbo lint && eslint \"tests/**/*.ts\" infra/postgres/migrate.js",
     "typecheck": "turbo typecheck && tsc --noEmit -p tsconfig.json",
     "test": "turbo test",
+    "test:unit": "vitest run tests/unit",
     "test:security": "vitest run tests/security",
     "test:integration": "vitest run tests/integration",
     "db:migrate": "node infra/postgres/migrate.js",

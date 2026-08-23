@@ -141,6 +141,42 @@
       ]
     },
     {
+      "username": "hr_manager_tenant_a@e0.local",
+      "email": "hr_manager_tenant_a@e0.local",
+      "firstName": "HrManager",
+      "lastName": "TenantA",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": { "org_slug": [ "org-tenant-a" ] },
+      "realmRoles": [ "hr-manager" ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "TestPass123!",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "viewer_tenant_a@e0.local",
+      "email": "viewer_tenant_a@e0.local",
+      "firstName": "Viewer",
+      "lastName": "TenantA",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": { "org_slug": [ "org-tenant-a" ] },
+      "realmRoles": [ "viewer" ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "TestPass123!",
+          "temporary": false
+        }
+      ]
+    },
+    {
       "username": "disabled_user@e0.local",
       "email": "disabled_user@e0.local",
       "firstName": "Disabled",

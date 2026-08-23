@@ -5,6 +5,7 @@ import * as schema from './schema';
 export * from './schema';
 
 export type Database = NodePgDatabase<typeof schema>;
+export type DbTransaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /**
  * Constructs a pg Pool + Drizzle instance from the given pool config.
