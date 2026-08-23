@@ -2,9 +2,10 @@
 
 Classifies the data types this system's locked architecture (`tenants`,
 `employees`, `documents`, `idempotency_keys`, and -- as of E2 --
-`audit_events`, `expiry_policies`; see `packages/database/src/schema.ts`)
-actually handles today. Extend this table when a future phase introduces new
-data, not before.
+`audit_events`, `expiry_policies`; and -- as of E3 --
+`tenant_notification_policies`, `notification_log`, `import_batches`; see
+`packages/database/src/schema.ts`) actually handles today. Extend this table
+when a future phase introduces new data, not before.
 
 | Data                                                      | Classification               | Examples                            | Handling rule                                                                                                                                  |
 | --------------------------------------------------------- | ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -16,6 +17,9 @@ data, not before.
 | Tenant metadata (`name`, `slug`, `status`)                | Internal                     | `org-tenant-a`                      | Not RLS-scoped by design (must be resolvable before tenant context exists) -- deliberately low-sensitivity: slug and display name only, no PII |
 | Auth tokens (JWT access tokens)                           | Secret (short-lived)         | Bearer tokens                       | Never logged; transmitted only via `Authorization` header over the local dev network; production transport security is a later-phase concern   |
 | Idempotency keys                                          | Internal                     | opaque string keys                  | RLS-scoped; contain no PII themselves but are tenant-attributed                                                                                |
+| Notification policy config (`tenant_notification_policies.*`) | Internal                 | `reminder_days_before: {90,60,30,14,7,1}`, `email_from` | Tenant-configurable, no PII; RLS-scoped like any tenant-owned config (E3) |
+| Notification log (`notification_log.document_id`/`.status`/`.error_message`) | Internal (references PII by ID only) | a document UUID, `SENT`/`FAILED`/`SUPPRESSED` | Append-only (app_user has SELECT+INSERT only, no UPDATE/DELETE); never stores employee name, document number, or email address -- only `document_id`; the email itself is resolved at dispatch time, never persisted or queued (E3) |
+| Import batch metadata (`import_batches.file_hash`/`.created_by`/row counts) | Internal | a SHA-256 hex digest, a JWT subject, integer counts | RLS-scoped; `file_hash` is opaque (not the file itself, which per Pillar 3 is processed in memory and never persisted to DB as a blob); `created_by` is a JWT subject like `audit_events.actor_user_id`, not a display name (E3) |
 | Credentials (`DATABASE_URL`, `KEYCLOAK_ADMIN_PASS`, etc.) | Secret                       | connection strings, admin passwords | Never committed (`.gitignore`); `.env.example` documents shape only, with `CHANGE_ME` placeholders                                             |
 
 ## Rules that apply across all classifications

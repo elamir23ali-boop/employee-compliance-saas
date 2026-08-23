@@ -112,3 +112,58 @@ export const idempotencyKeys = pgTable('idempotency_keys', {
   tenantId: uuid('tenant_id').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+// E3: one row per tenant. See 009_e3_reminders_import_dashboard.sql / ADR-025.
+export const tenantNotificationPolicies = pgTable('tenant_notification_policies', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id')
+    .notNull()
+    .references(() => tenants.id),
+  reminderDaysBefore: integer('reminder_days_before').array().notNull().default([90, 60, 30, 14, 7, 1]),
+  emailFrom: text('email_from'),
+  emailTemplateId: text('email_template_id'),
+  enabled: boolean('enabled').notNull().default(true),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// E3: append-only. app_user has no UPDATE/DELETE grant on this table at the
+// DB level (009_e3_reminders_import_dashboard.sql) -- same convention as
+// auditEvents above. Only document_id is stored, never employee name,
+// document number, or email address.
+export const notificationLog = pgTable('notification_log', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id')
+    .notNull()
+    .references(() => tenants.id),
+  documentId: uuid('document_id').references(() => documents.id),
+  notificationType: text('notification_type').notNull().default('EXPIRY_REMINDER').$type<'EXPIRY_REMINDER'>(),
+  daysBeforeExpiry: integer('days_before_expiry').notNull(),
+  sentAt: timestamp('sent_at', { withTimezone: true }).notNull().defaultNow(),
+  status: text('status').notNull().$type<'SENT' | 'FAILED' | 'SUPPRESSED'>(),
+  errorMessage: text('error_message'),
+});
+
+// E3: one row per upload attempt. fileHash (SHA-256 of the uploaded file's
+// content) backs the "re-uploading the same file returns the existing
+// batch" idempotency rule -- see 009_e3_reminders_import_dashboard.sql.
+export const importBatches = pgTable(
+  'import_batches',
+  {
+    importBatchId: uuid('import_batch_id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    status: text('status')
+      .notNull()
+      .default('PENDING')
+      .$type<'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'ROLLED_BACK'>(),
+    totalRows: integer('total_rows').notNull().default(0),
+    processedRows: integer('processed_rows').notNull().default(0),
+    errorRows: integer('error_rows').notNull().default(0),
+    fileHash: text('file_hash').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    createdBy: text('created_by'),
+  },
+  (table) => [unique().on(table.tenantId, table.fileHash)],
+);

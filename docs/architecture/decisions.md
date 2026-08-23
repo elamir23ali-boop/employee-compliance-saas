@@ -549,3 +549,63 @@ real GitHub Actions run, since GitHub-hosted runner behavior can't be fully
 replicated by running `docker compose` against this environment's own
 already-running dev containers (port/project-name collisions) -- see the E3
 final report for what was and wasn't verified locally versus in CI.
+
+## ADR-025: E3 Phase 2 schema -- notification policies/log, import batches, dashboard index
+
+Date: E3
+Status: ACCEPTED
+
+Context: E3 Pillars 2-4 (Reminder Engine, Excel Import/Export, Dashboard
+APIs) need new tables before any service code can be written against them.
+Per the Review Gates rule ("Any database migration" requires human review
+before implementing), this is recorded ahead of Phases 3-5 actually building
+against it. Single additive migration
+(`009_e3_reminders_import_dashboard.sql`, mirrored to
+`infra/postgres/init/09_...sql` per the ADR-012 convention), no application
+code changes.
+
+Decision:
+1. `tenant_notification_policies` -- one row per tenant (`UNIQUE(tenant_id)`),
+   `reminder_days_before INTEGER[]` so the reminder cadence is
+   tenant-configurable, never hardcoded (CLAUDE.md's "no hardcoded retention
+   period" rule, generalized here to notification cadence). RLS + NULLIF
+   guard, same pattern as every other tenant-owned table since ADR-003.
+2. `notification_log` is append-only by GRANT (`SELECT, INSERT` only, no
+   `UPDATE`/`DELETE`) -- same rationale as `audit_events`
+   (`005_audit_events.sql`): a dispatched notification's outcome is a
+   historical fact once recorded. Stores `document_id` only -- never
+   employee name, document number, or email address. The email address
+   itself is resolved at dispatch time (document_id -> employee), by
+   Phase 3's `EmailDispatcher`, never carried in a BullMQ payload or
+   persisted here -- this is what CLAUDE.md's "NEVER log PII" /
+   "NEVER pass ... in queue payloads" rules require, and this table's shape
+   is what makes that possible for Phase 3 to actually implement.
+3. `import_batches.file_hash` is not in the E3 spec's bulleted field list for
+   that table, but the spec's own idempotency requirement ("re-uploading the
+   same file, detected by SHA-256 hash of content, returns the existing
+   batch") cannot be implemented without persisting that hash somewhere to
+   compare future uploads against -- added as the column that rule needs,
+   with `UNIQUE(tenant_id, file_hash)` so Phase 3's `ImportService` can
+   detect a repeat upload with a single lookup instead of re-deriving it.
+   `created_by` is the JWT subject (`TEXT`), not a display name -- same
+   convention as `audit_events.actor_user_id`.
+4. `idx_documents_type_status ON documents(tenant_id, doc_type,
+   expiry_status)`: the E3 spec asks for `(tenant_id, expiry_date)` and
+   `(tenant_id, document_type, status)` indexes for the dashboard. The first
+   already exists (`idx_documents_expiry`, `007_documents_extended.sql`) --
+   not recreated. The second doesn't: `idx_documents_status`
+   (same migration) only covers `(tenant_id, expiry_status)` alone, not the
+   three-column composite the dashboard's per-doc-type breakdown
+   (`documentStats` in Pillar 4) needs, so that composite is added new here.
+5. No shared TypeScript types (`packages/shared/src/types/...`) or Drizzle
+   query code beyond the `schema.ts` mirror are added in this phase --
+   consistent with the E3 plan's own phase boundary (Phase 2 is schema only;
+   Phases 3-5 build the services and their DTOs against this schema).
+
+Consequences: Purely additive -- no existing table, column, RLS policy, or
+grant is altered. All three new tables follow the exact tenant-isolation
+policy text used by every table since ADR-003 (`NULLIF(current_setting(...),
+'') IS NOT NULL AND tenant_id = ...`), so there is no new RLS pattern to
+review, only new tables using the existing one. `docs/architecture/data-classification.md`
+is updated alongside this ADR per its own instruction to extend the table
+"when a future phase introduces new data."
