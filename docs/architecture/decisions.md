@@ -512,6 +512,14 @@ Decision:
    `git log`/tests -- it has to be configured once in GitHub's UI/API by
    someone with admin access to the repo, and `CONTRIBUTING.md` is the
    auditable record of what that configuration should be.
+7. Docker's own Keycloak `HEALTHCHECK` reporting "healthy" once was not
+   sufficient before starting the tests -- confirmed empirically: a live run
+   passed the healthcheck-wait step but `npm run test:security` still hit
+   `ECONNREFUSED ::1:8080` moments later. Added a follow-up step requiring 3
+   consecutive successful responses from the exact `/realms/e0-test`
+   endpoint the tests use before proceeding, and a Keycloak container-log
+   dump on failure (`docker compose logs keycloak`) alongside the existing
+   `api.log`/`worker.log` dump.
 
 Consequences: `test:security` and `test:integration`'s full 85-test surface
 (minus `test:unit`, already covered since ADR-023) is now exercised in CI on

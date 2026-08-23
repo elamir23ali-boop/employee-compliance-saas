@@ -99,6 +99,34 @@ jobs:
           $COMPOSE ps
           exit 1
 
+      # Docker's own HEALTHCHECK for Keycloak reports "healthy" the first
+      # time its `/realms/e0-test` probe succeeds, but under CI-runner load
+      # (right after pulling+starting all three images) that single check
+      # doesn't guarantee the endpoint is still reachable a few seconds
+      # later, when this job actually starts the API and tests fetch a
+      # token -- confirmed empirically: the healthcheck step passed, but
+      # `npm run test:security` still hit ECONNREFUSED on port 8080 on a
+      # live CI run. Requiring 3 consecutive successful responses (not just
+      # 1) from the exact realm endpoint the tests use closes that gap.
+      - name: Confirm Keycloak realm endpoint is stably reachable
+        run: |
+          consecutive=0
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/realms/e0-test)
+            if [ "$code" = "200" ] || [ "$code" = "302" ]; then
+              consecutive=$((consecutive + 1))
+            else
+              consecutive=0
+            fi
+            if [ "$consecutive" -ge 3 ]; then
+              echo "Keycloak realm endpoint stable."; exit 0
+            fi
+            sleep 2
+          done
+          echo "Keycloak realm endpoint never stabilized:"
+          docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml logs keycloak --tail 100
+          exit 1
+
       - name: Start API (background)
         run: |
           npm run start --workspace=@ecs/api > api.log 2>&1 &
@@ -132,11 +160,13 @@ jobs:
       - run: npm run test:security
       - run: npm run test:integration
 
-      - name: Dump API/worker logs
+      - name: Dump API/worker/Keycloak logs
         if: failure()
         run: |
           echo "--- api.log ---"; cat api.log 2>/dev/null || true
           echo "--- worker.log ---"; cat worker.log 2>/dev/null || true
+          echo "--- keycloak container logs ---"
+          docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml logs keycloak --tail 200 || true
 
       - name: Stop API and worker
         if: always()
