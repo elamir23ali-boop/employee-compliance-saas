@@ -66,6 +66,16 @@ jobs:
           cache: 'npm'
       - run: npm ci
 
+      # apps/api's `nest start` and apps/worker's `node dist/main.js` both
+      # resolve @ecs/database and @ecs/shared through their built `dist/`
+      # (each workspace's package.json `main` points there) -- on a fresh
+      # checkout in this job (no artifacts carried over from `unit-tests`,
+      # which runs on its own runner), nothing is built yet. Without this
+      # step both processes fail immediately (TS2307 "Cannot find module
+      # '@ecs/database'" / MODULE_NOT_FOUND), which a naive readiness check
+      # can miss -- see the curl fix below.
+      - run: npm run build
+
       - name: Start Postgres, Redis, Keycloak
         run: docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml up -d
 
@@ -91,25 +101,42 @@ jobs:
 
       - name: Start API (background)
         run: |
-          npm run start --workspace=@ecs/api &
+          npm run start --workspace=@ecs/api > api.log 2>&1 &
           echo $! > api.pid
 
       - name: Start worker (background)
         run: |
-          npm run start --workspace=@ecs/worker &
+          npm run start --workspace=@ecs/worker > worker.log 2>&1 &
           echo $! > worker.pid
 
       - name: Wait for API readiness
         run: |
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/ || echo 000)
-            if [ "$code" != "000" ]; then echo "API is up (HTTP $code)"; exit 0; fi
+            if ! kill -0 "$(cat api.pid)" 2>/dev/null; then
+              echo "API process died before becoming ready:"; cat api.log; exit 1
+            fi
+            # Any completed HTTP response (including 404) means the API is
+            # up -- checked via curl's own exit code, not by parsing
+            # %{http_code} text: on connection refused, curl's `-w` output
+            # and a `|| echo 000` fallback both write to stdout, silently
+            # concatenating into "000000" (!= "000") and reporting "up" when
+            # the connection had actually failed. Confirmed empirically on a
+            # real CI run.
+            if curl -s -o /dev/null http://localhost:3000/; then
+              echo "API is up"; exit 0
+            fi
             sleep 2
           done
-          echo "API did not come up in time"; exit 1
+          echo "API did not come up in time:"; cat api.log; exit 1
 
       - run: npm run test:security
       - run: npm run test:integration
+
+      - name: Dump API/worker logs
+        if: failure()
+        run: |
+          echo "--- api.log ---"; cat api.log 2>/dev/null || true
+          echo "--- worker.log ---"; cat worker.log 2>/dev/null || true
 
       - name: Stop API and worker
         if: always()

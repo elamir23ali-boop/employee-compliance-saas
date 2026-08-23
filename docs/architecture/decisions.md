@@ -496,14 +496,16 @@ Decision:
    today, and a full-repository TruffleHog scan (`extra_args:
    --only-verified`, no `base`/`head`) for the `schedule` trigger, which has
    no meaningful diff to compare -- `ci.yml`'s own TruffleHog step already
-   covers the diff-based push/PR case. The Snyk no-op condition (`if:
-   secrets.SNYK_TOKEN != ''`) had to live on the step, not the job -- a
-   job-level `if:` referencing `secrets` fails GitHub's workflow-file
-   validation outright (confirmed empirically: pushing the job-level version
-   produced a "workflow file issue" run with zero jobs scheduled, on this
-   exact branch). `secrets` is documented as available in a step's `if:` but
-   not a job's; moving the condition down to the one step that uses it fixed
-   this.
+   covers the diff-based push/PR case. The Snyk no-op condition could not be
+   written as `if: secrets.SNYK_TOKEN != ''` on the job, nor (initially
+   assumed as the fix) on the step either -- `secrets` cannot be referenced
+   directly in an `if:` expression at any level. Confirmed empirically on
+   this branch's own CI runs: both attempts produced "Invalid workflow file:
+   Unrecognized named-value: 'secrets'" (zero jobs scheduled for the whole
+   workflow). The working pattern checks the secret's presence inside a
+   `run:` step instead (`secrets.X` is valid there, and in `env:`/`with:`),
+   writes a `steps.<id>.outputs` boolean, and conditions the actual Snyk step
+   on that output -- never on `secrets` directly.
 6. Branch protection (PR required, all 5 `ci.yml` jobs required, 1 approving
    review, no force-push) is documented in `CONTRIBUTING.md`. This is a
    GitHub repo *setting*, not a file in this repo, so it can't be verified by

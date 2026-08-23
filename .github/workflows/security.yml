@@ -37,12 +37,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `secrets` cannot be referenced directly in an `if:` expression at
+      # all -- neither job- nor step-level -- confirmed empirically on a
+      # real run: "Invalid workflow file: Unrecognized named-value:
+      # 'secrets'". `secrets.X` is only valid inside `env:`/`with:` or a
+      # step's `run:` body, so the presence check has to happen inside a
+      # `run:` step (writing a `steps.<id>.outputs` value), with later steps
+      # conditioned on that output instead of on `secrets` directly.
+      - name: Check for Snyk token
+        id: check_snyk
+        run: |
+          if [ -n "${{ secrets.SNYK_TOKEN }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Run Snyk
-        # `secrets` is only readable in a step-level `if:`, not a job-level
-        # one (a job-level `if: ${{ secrets.X != '' }}` fails workflow-file
-        # validation entirely) -- hence the condition lives here, not on the
-        # job.
-        if: ${{ secrets.SNYK_TOKEN != '' }}
+        if: steps.check_snyk.outputs.present == 'true'
         uses: snyk/actions/node@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
