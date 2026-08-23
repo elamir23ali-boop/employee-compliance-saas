@@ -433,3 +433,119 @@ running the API/worker processes, exactly as they were before E2 -- not a
 regression, but not fixed either. Recorded here so it isn't mistaken for
 "E2 wired up full CI test coverage" -- it did not. Risk carried into E3 (or a
 dedicated CI-infrastructure task) as a known gap.
+
+## ADR-024: CI closes the ADR-023 gap via `docker compose` on the runner, not GitHub Actions `services:`
+
+Date: E3
+Status: ACCEPTED
+
+Context: ADR-023 left `test:security`'s HTTP+Keycloak-dependent tests and all
+of `test:integration` CI-unenforced, because GitHub Actions `services:`
+containers can't bind-mount local files the way `docker compose`'s
+`docker-entrypoint-initdb.d` (Postgres) and realm-import (Keycloak) volume
+mounts do. Closing this gap is E3 Pillar 1's stated goal. The fix does not
+require new CI infrastructure: GitHub-hosted `ubuntu-latest` runners ship
+Docker Engine and the Compose v2 plugin already, so `docker compose -f
+infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml up
+-d` run as a plain step in a job works identically to local dev -- local
+files bind-mount normally because it's the same `docker compose` CLI, not
+GitHub's `services:` feature. This sidesteps the ADR-015/ADR-023 limitation
+entirely rather than working around it.
+
+Decision:
+1. `.github/workflows/ci.yml` is restructured into 5 sequentially-gated jobs
+   (`lint -> unit-tests -> integration -> security-scan -> build`, chained
+   via `needs:`, so a failure stops the pipeline before the next stage
+   starts). `integration` brings up the full stack via `docker compose`,
+   waits on each container's healthcheck (`docker inspect
+   .State.Health.Status`, not `docker compose ps --format`, whose Go-template
+   fields aren't stable across Compose versions), starts `apps/api` and
+   `apps/worker` as background processes, waits for the API to respond, then
+   runs `test:security` and `test:integration` together -- both need the same
+   live stack, so splitting them into separate jobs would just duplicate the
+   docker-compose bring-up cost for no isolation benefit.
+2. Fixed a real, latent bug in `infra/docker/docker-compose.test.yml`
+   surfaced by actually validating it (`docker compose config`) for the first
+   time: it declared a top-level `tmpfs: [/var/lib/postgresql]` on the
+   `postgres` service *alongside* the base file's named-volume mount at the
+   same target -- two mounts claiming one path, which Compose rejects. This
+   was never caught before E3 because, per ADR-023, the integration path
+   this override exists for was never actually exercised end-to-end. Fixed by
+   redefining the `postgres_data` named volume itself with a tmpfs
+   `driver_opts` (RAM-backed, still ephemeral) instead of adding a competing
+   `tmpfs:` mount -- the base file's single `volumes:` mount to
+   `/var/lib/postgresql` is unchanged, only what backs it differs.
+3. Added per-service `deploy.resources.limits` to the same override. Also
+   tried `internal: true` on the network for egress isolation, then reverted
+   it -- confirmed empirically on a live CI run: Keycloak logged "Listening
+   on: http://0.0.0.0:8080" and stayed up throughout, but its published port
+   was never reachable from the runner across a full 60s of retries with
+   `internal: true` set. That contradicts the general claim that `internal:
+   true` only blocks container-initiated egress and leaves published ports
+   alone; whatever the exact mechanism in this environment, the tests need
+   host->container reachability more than this stack needs egress isolation,
+   so `internal: true` was dropped rather than chasing the exact cause
+   further. Revisit if this stack ever needs real egress isolation.
+4. `security-scan` runs `npm audit --audit-level=high` (as before) plus
+   `trivy fs` (dependency/filesystem scan) instead of a container-image scan.
+   No Dockerfile or built image exists anywhere in this repo yet -- per
+   `docs/architecture/threat-model.md`'s "no production deployment topology"
+   scope note -- so there is no image for Trivy to scan. `trivy fs` is the
+   applicable equivalent today; an image scan (and `hadolint`, which lints
+   Dockerfiles that also don't exist) should be added when a Dockerfile is
+   introduced in a later phase, not stubbed out now. (`aquasecurity/trivy-action`
+   release tags are `v0.28.0`, not `0.28.0` -- an initial bare-version pin
+   made GitHub unable to resolve the action at all, "Set up job" failing
+   before any step ran; confirmed on a live run and fixed to a real tag.)
+5. `.github/workflows/security.yml`'s schedule moved from weekly (Monday
+   06:00) to daily 02:00 UTC. Added a conditional Snyk job that no-ops rather
+   than hard-fails since no Snyk token is provisioned in this environment
+   today, and a full-repository TruffleHog scan (`extra_args:
+   --only-verified`, no `base`/`head`) for the `schedule` trigger, which has
+   no meaningful diff to compare -- `ci.yml`'s own TruffleHog step already
+   covers the diff-based push/PR case. The Snyk no-op condition could not be
+   written as `if: secrets.SNYK_TOKEN != ''` on the job, nor (initially
+   assumed as the fix) on the step either -- `secrets` cannot be referenced
+   directly in an `if:` expression at any level. Confirmed empirically on
+   this branch's own CI runs: both attempts produced "Invalid workflow file:
+   Unrecognized named-value: 'secrets'" (zero jobs scheduled for the whole
+   workflow). The working pattern checks the secret's presence inside a
+   `run:` step instead (`secrets.X` is valid there, and in `env:`/`with:`),
+   writes a `steps.<id>.outputs` boolean, and conditions the actual Snyk step
+   on that output -- never on `secrets` directly.
+6. Branch protection (PR required, all 5 `ci.yml` jobs required, 1 approving
+   review, no force-push) is documented in `CONTRIBUTING.md`. This is a
+   GitHub repo *setting*, not a file in this repo, so it can't be verified by
+   `git log`/tests -- it has to be configured once in GitHub's UI/API by
+   someone with admin access to the repo, and `CONTRIBUTING.md` is the
+   auditable record of what that configuration should be.
+7. Docker's own Keycloak `HEALTHCHECK` reporting "healthy" once was not
+   sufficient before starting the tests -- confirmed empirically: a live run
+   passed the healthcheck-wait step but `npm run test:security` still hit
+   `ECONNREFUSED ::1:8080` moments later. Added a follow-up step requiring 3
+   consecutive successful responses from the exact `/realms/e0-test`
+   endpoint the tests use before proceeding, plus a Keycloak container-log
+   dump on failure (`docker compose logs keycloak`) alongside the existing
+   `api.log`/`worker.log` dump. The first version of that follow-up step had
+   its own bug, also only found by running it for real: GitHub Actions runs
+   each `run:` block as `bash -e`, and `code=$(curl ...)` as a bare
+   assignment trips `errexit` on curl's first connection failure, aborting
+   the whole retry loop after a single attempt instead of retrying for up to
+   60s as intended -- the step failed in under a second with curl's own exit
+   code (7), not a timeout. Fixed by using `curl -f` directly as an `if`
+   condition (a command used as an `if`/`while` condition is exempt from
+   `errexit` regardless of its exit status), which doubles as the
+   "2xx/3xx only" check `-f` is for, so no separate status-code parsing is
+   needed either.
+
+Consequences: `test:security` and `test:integration`'s full 85-test surface
+(minus `test:unit`, already covered since ADR-023) is now exercised in CI on
+every push/PR, closing the gap ADR-023 left open. The pipeline is now fully
+sequential rather than parallel, trading CI wall-clock time (each stage waits
+for the previous one) for a stricter gate -- acceptable here since merge
+safety, not CI speed, is what Pillar 1 was scoped to fix. Full end-to-end
+verification of this workflow (as opposed to local config validation) needs a
+real GitHub Actions run, since GitHub-hosted runner behavior can't be fully
+replicated by running `docker compose` against this environment's own
+already-running dev containers (port/project-name collisions) -- see the E3
+final report for what was and wasn't verified locally versus in CI.
