@@ -5,11 +5,18 @@
 ## E3: also used as CI's integration stack (.github/workflows/ci.yml) via
 ## `docker compose` run directly on the runner -- not GitHub Actions
 ## `services:`, which can't bind-mount local files the way this can (ADR-015/
-## ADR-023/ADR-024). Adds per-service resource limits and an isolated bridge
-## network so the test stack can't reach (or be reached from) anything other
-## than the containers/host it's meant for. `internal: true` blocks
-## container-initiated egress; published ports (5432/6379/8080) still reach
-## the containers from the host/CI runner, which is all the test suites need.
+## ADR-023/ADR-024). Adds per-service resource limits.
+##
+## NOTE: an isolated (`internal: true`) bridge network was tried here and
+## reverted -- confirmed empirically on a live CI run: Keycloak logged
+## "Listening on: http://0.0.0.0:8080" and stayed up the whole time, but its
+## published port was never reachable from the runner for a full 60s of
+## retries. Whatever the exact mechanism (this contradicts the general claim
+## that `internal: true` only blocks container-initiated egress and leaves
+## published ports alone), the tests need host->container reachability more
+## than they need network isolation, so isolation was dropped rather than
+## chasing the exact cause further. Revisit if this stack ever needs
+## real egress isolation.
 ##
 ## NOTE: the `postgres_data` named volume is redefined here (not the
 ## service's `volumes:` mount list) with a tmpfs driver, so its target
@@ -22,11 +29,6 @@
 ## integration path it exists for was never wired into CI until now).
 ##
 ## Usage: docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml up -d
-networks:
-  default:
-    driver: bridge
-    internal: true
-
 volumes:
   postgres_data:
     driver_opts:

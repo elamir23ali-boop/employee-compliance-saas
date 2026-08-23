@@ -475,13 +475,17 @@ Decision:
    `driver_opts` (RAM-backed, still ephemeral) instead of adding a competing
    `tmpfs:` mount -- the base file's single `volumes:` mount to
    `/var/lib/postgresql` is unchanged, only what backs it differs.
-3. Added `internal: true` + per-service `deploy.resources.limits` to the same
-   override, so the CI/local test stack can't reach (or be reached from)
-   anything beyond the containers/host it's for. `internal: true` blocks
-   container-initiated egress; published ports (5432/6379/8080) are
-   unaffected since port publishing is independent of a network's internal
-   flag -- host/CI-runner access to the containers still works, which is all
-   the test suites need.
+3. Added per-service `deploy.resources.limits` to the same override. Also
+   tried `internal: true` on the network for egress isolation, then reverted
+   it -- confirmed empirically on a live CI run: Keycloak logged "Listening
+   on: http://0.0.0.0:8080" and stayed up throughout, but its published port
+   was never reachable from the runner across a full 60s of retries with
+   `internal: true` set. That contradicts the general claim that `internal:
+   true` only blocks container-initiated egress and leaves published ports
+   alone; whatever the exact mechanism in this environment, the tests need
+   host->container reachability more than this stack needs egress isolation,
+   so `internal: true` was dropped rather than chasing the exact cause
+   further. Revisit if this stack ever needs real egress isolation.
 4. `security-scan` runs `npm audit --audit-level=high` (as before) plus
    `trivy fs` (dependency/filesystem scan) instead of a container-image scan.
    No Dockerfile or built image exists anywhere in this repo yet -- per
