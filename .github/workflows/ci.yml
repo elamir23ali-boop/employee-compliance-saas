@@ -207,7 +207,7 @@ jobs:
       # misconfigurations. Re-add an image scan when a Dockerfile is
       # introduced in a later phase.
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .

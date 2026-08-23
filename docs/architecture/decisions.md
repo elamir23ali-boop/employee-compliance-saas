@@ -493,7 +493,10 @@ Decision:
    scope note -- so there is no image for Trivy to scan. `trivy fs` is the
    applicable equivalent today; an image scan (and `hadolint`, which lints
    Dockerfiles that also don't exist) should be added when a Dockerfile is
-   introduced in a later phase, not stubbed out now.
+   introduced in a later phase, not stubbed out now. (`aquasecurity/trivy-action`
+   release tags are `v0.28.0`, not `0.28.0` -- an initial bare-version pin
+   made GitHub unable to resolve the action at all, "Set up job" failing
+   before any step ran; confirmed on a live run and fixed to a real tag.)
 5. `.github/workflows/security.yml`'s schedule moved from weekly (Monday
    06:00) to daily 02:00 UTC. Added a conditional Snyk job that no-ops rather
    than hard-fails since no Snyk token is provisioned in this environment
