@@ -1,7 +1,7 @@
 name: Security Scan
 on:
   schedule:
-    - cron: '0 6 * * 1' # Every Monday 6am
+    - cron: '0 2 * * *' # Daily, 02:00 UTC (E3)
   push:
     branches: [main]
 
@@ -29,3 +29,38 @@ jobs:
           node-version: '24'
       - run: npm ci
       - run: npm audit --audit-level=moderate
+
+  # Runs only when a SNYK_TOKEN secret is configured on the repo -- Snyk
+  # isn't provisioned in this environment today, so this degrades to a no-op
+  # rather than a hard CI failure until a token is added.
+  snyk:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.SNYK_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Snyk
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+  # Full-repo secret scan. Unlike ci.yml's push/PR-triggered TruffleHog step
+  # (which diffs base..head), a `schedule` run has no meaningful base/head to
+  # diff, so this scans the whole checked-out tree instead.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: TruffleHog full filesystem scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --only-verified
+
+  # No Dockerfiles/container images exist in this repo yet (see
+  # docs/architecture/threat-model.md, "Explicitly out of scope for E0/E1" --
+  # no production deployment topology). hadolint lints Dockerfiles; with none
+  # present there is nothing to lint. Add a hadolint job here when a
+  # Dockerfile is introduced in a later phase -- not stubbed out now to avoid
+  # inventing infrastructure this phase doesn't otherwise need.

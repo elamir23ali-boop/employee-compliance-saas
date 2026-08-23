@@ -15,9 +15,13 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   `EXCEPTION`/`EXPIRED`/`BLOCKED`), an append-only audit trail, and optimistic
   locking on writes. See `docs/architecture/decisions.md` (ADR-020..023) for
   the design decisions this phase made and why.
-- E3 has not started. No E3 scope (billing, notifications, background
-  scheduling, alerting on audit-write failures, CI-in-Keycloak) exists in
-  this codebase yet.
+- E3 in progress. Pillar 1 (CI/CD hardening) complete: `.github/workflows/ci.yml`
+  restructured into 5 sequentially-gated stages (lint → unit-tests →
+  integration → security-scan → build); the `integration` stage runs
+  `docker compose` (Postgres+Redis+Keycloak) plus the API/worker processes,
+  closing the ADR-023 CI gap for `test:security`/`test:integration`'s
+  HTTP+Keycloak-dependent tests. See ADR-024. Remaining E3 pillars (reminder
+  engine, Excel import/export, dashboard APIs) not yet started.
 
 ## ABSOLUTE PROHIBITIONS
 
@@ -102,14 +106,16 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   (both HTTP-driven: require `docker compose up` — Postgres+Redis+Keycloak —
   plus the API (`apps/api`) and worker (`apps/worker`) processes running locally)
 - Current state: 85/85 passing (31 unit / 32 security / 22 integration)
-- **Known CI gap (carried into E3, not fixed by E2):** `.github/workflows/ci.yml`
-  only runs `test:unit` and `test:security`'s Postgres/Redis-only portion in
-  CI. The HTTP+Keycloak-dependent tests in `test:security` and all of
-  `test:integration` are NOT currently enforced by CI — they require a live
-  API process and a Keycloak realm import that GitHub Actions `services:`
-  containers can't provision the way local `docker compose` does (see
-  ADR-023). These suites are verified locally only today. Closing this gap is
-  E3 scope, not something to patch ad hoc.
+- **CI gap (ADR-023) addressed in E3 Pillar 1 (ADR-024), pending live verification:**
+  `.github/workflows/ci.yml`'s `integration` job now runs `docker compose`
+  (Postgres+Redis+Keycloak) directly on the runner — not GitHub Actions
+  `services:`, which can't bind-mount local files — plus the API/worker
+  processes, then runs both `test:security` and `test:integration` against
+  that live stack. Validated locally via `docker compose config` only (this
+  environment's own dev containers occupy the same ports/project name, so a
+  full local dry-run would collide with them); a real GitHub Actions run on a
+  pushed branch/PR is still needed to confirm all 5 stages actually go green
+  before this is called closed.
 - Every test file that creates real rows via the API must clean up after
   itself (`tests/support/db-cleanup.ts` + `afterAll` hooks) — `tests/security/**`
   runs with `fileParallelism: false` against one shared database, so an

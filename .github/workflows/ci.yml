@@ -5,8 +5,14 @@ on:
   pull_request:
     branches: [main]
 
+# E3: five stages, strictly gated in order (lint -> unit-tests -> integration
+# -> security-scan -> build) via `needs:` -- a failure at any stage stops the
+# pipeline before the next one starts. Combined with branch protection
+# (see CONTRIBUTING.md), no PR can merge into main without all five green.
+# See docs/architecture/decisions.md (ADR-024) for why this replaces E1's
+# GitHub Actions `services:`-based test-security job.
 jobs:
-  lint-and-typecheck:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,24 +24,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
 
-  security-audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
-      - run: npm ci
-      - run: npm audit --audit-level=high
-      - name: Check for secrets
-        uses: trufflesecurity/trufflehog@main
-        with:
-          path: ./
-          base: main
-          head: HEAD
-
-  test-unit:
+  unit-tests:
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,26 +37,27 @@ jobs:
       - run: npm run build
       - run: npm run test:unit
 
-  test-security:
+  # Full-stack gate: Postgres + Redis + Keycloak via `docker compose`
+  # (not GitHub Actions `services:`, which cannot bind-mount local files --
+  # see ADR-015/ADR-023) plus the actual API and worker processes, so every
+  # HTTP+Keycloak-dependent test in tests/security/** and all of
+  # tests/integration/** runs in CI, not just locally.
+  integration:
+    needs: unit-tests
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_DB: e0db
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres_dev
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d e0db"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
+    env:
+      DATABASE_URL: postgresql://app_user:app_dev_pass_local@localhost:5432/e0db
+      DATABASE_MIGRATION_URL: postgresql://migration_user:migration_dev_pass_local@localhost:5432/e0db
+      DATABASE_ADMIN_URL: postgresql://postgres:postgres_superuser_local_only@localhost:5432/e0db
+      REDIS_URL: redis://:dev-redis-pass@localhost:6379/1
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/e0-test
+      KEYCLOAK_JWKS_URI: http://localhost:8080/realms/e0-test/protocol/openid-connect/certs
+      KEYCLOAK_CLIENT_ID: e0-api
+      KEYCLOAK_ADMIN_URL: http://localhost:8080
+      KEYCLOAK_ADMIN_USER: admin
+      KEYCLOAK_ADMIN_PASS: admin
+      PORT: 3000
+      NODE_ENV: test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -74,17 +65,105 @@ jobs:
           node-version: '24'
           cache: 'npm'
       - run: npm ci
-      # GitHub Actions `services:` containers don't support mounting local
-      # files as docker-entrypoint-initdb.d, unlike local `docker compose up`
-      # (see infra/docker/docker-compose.yml) -- so roles/schema/RLS/seed
-      # data are applied explicitly here instead. See
-      # docs/architecture/decisions.md (ADR-015).
-      - name: Apply DB migrations (roles, schema, RLS, seed)
-        run: node infra/postgres/migrate.js
-        env:
-          DATABASE_ADMIN_URL: postgresql://postgres:postgres_dev@localhost:5432/e0db
+
+      - name: Start Postgres, Redis, Keycloak
+        run: docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml up -d
+
+      - name: Wait for Postgres/Redis/Keycloak healthchecks
+        run: |
+          COMPOSE="docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml"
+          for i in $(seq 1 60); do
+            ids=$($COMPOSE ps -q)
+            all_healthy=true
+            for id in $ids; do
+              status=$(docker inspect --format='{{.State.Health.Status}}' "$id" 2>/dev/null || echo "unknown")
+              if [ "$status" != "healthy" ]; then all_healthy=false; fi
+            done
+            if [ "$all_healthy" = true ] && [ -n "$ids" ]; then
+              echo "All services healthy."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Services did not become healthy in time:"
+          $COMPOSE ps
+          exit 1
+
+      - name: Start API (background)
+        run: |
+          npm run start --workspace=@ecs/api &
+          echo $! > api.pid
+
+      - name: Start worker (background)
+        run: |
+          npm run start --workspace=@ecs/worker &
+          echo $! > worker.pid
+
+      - name: Wait for API readiness
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/ || echo 000)
+            if [ "$code" != "000" ]; then echo "API is up (HTTP $code)"; exit 0; fi
+            sleep 2
+          done
+          echo "API did not come up in time"; exit 1
+
       - run: npm run test:security
-        env:
-          DATABASE_URL: postgresql://app_user:app_dev_pass_local@localhost:5432/e0db
-          DATABASE_MIGRATION_URL: postgresql://migration_user:migration_dev_pass_local@localhost:5432/e0db
-          NODE_ENV: test
+      - run: npm run test:integration
+
+      - name: Stop API and worker
+        if: always()
+        run: |
+          [ -f api.pid ] && kill "$(cat api.pid)" || true
+          [ -f worker.pid ] && kill "$(cat worker.pid)" || true
+
+      - name: Tear down docker compose stack
+        if: always()
+        run: docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml down -v
+
+  security-scan:
+    needs: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm audit --audit-level=high
+
+      # No Dockerfiles/container images exist in this repo yet (no production
+      # deployment topology -- see docs/architecture/threat-model.md,
+      # "Explicitly out of scope for E0/E1"), so there is nothing for Trivy
+      # to scan as an image. `trivy fs` is the applicable equivalent today:
+      # it scans the dependency tree and repo filesystem for known CVEs and
+      # misconfigurations. Re-add an image scan when a Dockerfile is
+      # introduced in a later phase.
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Check for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+
+  build:
+    needs: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build

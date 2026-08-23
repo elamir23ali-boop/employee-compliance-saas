@@ -2,10 +2,57 @@
 ## outside CI). Same images/config as docker-compose.yml, with an ephemeral
 ## (non-persistent) Postgres volume so each run starts from a clean database.
 ##
+## E3: also used as CI's integration stack (.github/workflows/ci.yml) via
+## `docker compose` run directly on the runner -- not GitHub Actions
+## `services:`, which can't bind-mount local files the way this can (ADR-015/
+## ADR-023/ADR-024). Adds per-service resource limits and an isolated bridge
+## network so the test stack can't reach (or be reached from) anything other
+## than the containers/host it's meant for. `internal: true` blocks
+## container-initiated egress; published ports (5432/6379/8080) still reach
+## the containers from the host/CI runner, which is all the test suites need.
+##
+## NOTE: the `postgres_data` named volume is redefined here (not the
+## service's `volumes:` mount list) with a tmpfs driver, so its target
+## (`/var/lib/postgresql`, from docker-compose.yml) stays a single mount
+## backed by RAM instead of disk. A bare top-level `tmpfs:` key on the
+## service used to be declared alongside the base file's named-volume mount
+## at the same target -- `docker compose config` rejects that as two mounts
+## claiming one path. This was never caught before E3 because this override
+## was never actually exercised end-to-end (see ADR-023: the Keycloak+API
+## integration path it exists for was never wired into CI until now).
+##
 ## Usage: docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.test.yml up -d
+networks:
+  default:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres_data:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
 services:
   postgres:
     volumes:
       - ../postgres/init:/docker-entrypoint-initdb.d:ro
-    tmpfs:
-      - /var/lib/postgresql
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  redis:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  keycloak:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 768M
