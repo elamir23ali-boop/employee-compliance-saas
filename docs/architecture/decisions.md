@@ -491,12 +491,19 @@ Decision:
    Dockerfiles that also don't exist) should be added when a Dockerfile is
    introduced in a later phase, not stubbed out now.
 5. `.github/workflows/security.yml`'s schedule moved from weekly (Monday
-   06:00) to daily 02:00 UTC. Added a conditional Snyk job (`if:
-   secrets.SNYK_TOKEN != ''`) that no-ops rather than hard-fails since no
-   Snyk token is provisioned in this environment today, and a full-repository
-   TruffleHog scan (`extra_args: --only-verified`, no `base`/`head`) for the
-   `schedule` trigger, which has no meaningful diff to compare -- `ci.yml`'s
-   own TruffleHog step already covers the diff-based push/PR case.
+   06:00) to daily 02:00 UTC. Added a conditional Snyk job that no-ops rather
+   than hard-fails since no Snyk token is provisioned in this environment
+   today, and a full-repository TruffleHog scan (`extra_args:
+   --only-verified`, no `base`/`head`) for the `schedule` trigger, which has
+   no meaningful diff to compare -- `ci.yml`'s own TruffleHog step already
+   covers the diff-based push/PR case. The Snyk no-op condition (`if:
+   secrets.SNYK_TOKEN != ''`) had to live on the step, not the job -- a
+   job-level `if:` referencing `secrets` fails GitHub's workflow-file
+   validation outright (confirmed empirically: pushing the job-level version
+   produced a "workflow file issue" run with zero jobs scheduled, on this
+   exact branch). `secrets` is documented as available in a step's `if:` but
+   not a job's; moving the condition down to the one step that uses it fixed
+   this.
 6. Branch protection (PR required, all 5 `ci.yml` jobs required, 1 approving
    review, no force-push) is documented in `CONTRIBUTING.md`. This is a
    GitHub repo *setting*, not a file in this repo, so it can't be verified by

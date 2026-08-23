@@ -35,10 +35,14 @@ jobs:
   # rather than a hard CI failure until a token is added.
   snyk:
     runs-on: ubuntu-latest
-    if: ${{ secrets.SNYK_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Run Snyk
+        # `secrets` is only readable in a step-level `if:`, not a job-level
+        # one (a job-level `if: ${{ secrets.X != '' }}` fails workflow-file
+        # validation entirely) -- hence the condition lives here, not on the
+        # job.
+        if: ${{ secrets.SNYK_TOKEN != '' }}
         uses: snyk/actions/node@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
