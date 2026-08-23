@@ -517,9 +517,19 @@ Decision:
    passed the healthcheck-wait step but `npm run test:security` still hit
    `ECONNREFUSED ::1:8080` moments later. Added a follow-up step requiring 3
    consecutive successful responses from the exact `/realms/e0-test`
-   endpoint the tests use before proceeding, and a Keycloak container-log
+   endpoint the tests use before proceeding, plus a Keycloak container-log
    dump on failure (`docker compose logs keycloak`) alongside the existing
-   `api.log`/`worker.log` dump.
+   `api.log`/`worker.log` dump. The first version of that follow-up step had
+   its own bug, also only found by running it for real: GitHub Actions runs
+   each `run:` block as `bash -e`, and `code=$(curl ...)` as a bare
+   assignment trips `errexit` on curl's first connection failure, aborting
+   the whole retry loop after a single attempt instead of retrying for up to
+   60s as intended -- the step failed in under a second with curl's own exit
+   code (7), not a timeout. Fixed by using `curl -f` directly as an `if`
+   condition (a command used as an `if`/`while` condition is exempt from
+   `errexit` regardless of its exit status), which doubles as the
+   "2xx/3xx only" check `-f` is for, so no separate status-code parsing is
+   needed either.
 
 Consequences: `test:security` and `test:integration`'s full 85-test surface
 (minus `test:unit`, already covered since ADR-023) is now exercised in CI on

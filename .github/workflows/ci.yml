@@ -110,10 +110,19 @@ jobs:
       # 1) from the exact realm endpoint the tests use closes that gap.
       - name: Confirm Keycloak realm endpoint is stably reachable
         run: |
+          # GitHub Actions runs each `run:` block as `bash -e`. `code=$(curl
+          # ...)` as a bare assignment trips `errexit` the instant curl fails
+          # to connect, aborting this whole step on its first attempt
+          # instead of retrying -- confirmed empirically on a live run (the
+          # step failed in <1s with curl exit code 7, well inside the
+          # 60s budget below). Using `curl -f` directly as an `if` condition
+          # avoids that: a command used as an `if`/`while` condition is
+          # exempt from `errexit` regardless of its exit status. `-f` also
+          # makes curl itself fail on a non-2xx/3xx response, so this
+          # doubles as the "200 or 302" check without parsing status text.
           consecutive=0
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/realms/e0-test)
-            if [ "$code" = "200" ] || [ "$code" = "302" ]; then
+            if curl -sf -o /dev/null http://localhost:8080/realms/e0-test; then
               consecutive=$((consecutive + 1))
             else
               consecutive=0
