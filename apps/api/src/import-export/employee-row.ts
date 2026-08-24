@@ -1,6 +1,6 @@
 import type ExcelJS from 'exceljs';
 import type { CreateEmployeeDto } from '@ecs/shared';
-import { createEmployeeSchema } from '../employees/employees.controller';
+import { createEmployeeSchema } from '../employees/employees.schemas';
 
 export type ParsedEmployeeRow = { data: CreateEmployeeDto } | { error: string };
 

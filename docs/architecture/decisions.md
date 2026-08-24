@@ -754,3 +754,54 @@ existing `import.worker.ts` stub (E0-era) is unchanged; the API's new
 PII-free completion signal (`{ tenantId, jobId, idempotencyKey, rowCount
 }`) after each batch finishes -- consistent with the reminder engine's
 queue-payload convention (ADR-025 decision #2 / ADR-026 decision #3).
+
+## ADR-028: E4 Pillar 1 -- root tsconfig lacked `experimentalDecorators`, silently tolerated until a unit test imported a NestJS controller
+
+Date: E4
+Status: ACCEPTED
+
+Context: E4 Pillar 1 is "push a branch/PR and confirm all 5 `ci.yml` jobs
+actually go green on a real GitHub Actions runner" -- exactly the
+verification ADR-024 left as its own final open item. The very first live
+run (PR #2) failed at the `lint` job's `npm run typecheck` step, never
+before caught locally across three prior phases of `npm run typecheck
+--workspace=@ecs/api` calls. Root cause: the root `tsconfig.json` (which
+governs `tests/**/*.ts`, the only files it `include`s) has no
+`experimentalDecorators`/`emitDecoratorMetadata`, unlike every app-level
+tsconfig. TypeScript's *type-checking* still follows `import`s outside
+`include`/`exclude` boundaries -- `exclude: ["apps", "packages"]` only
+stops tsc from directly enumerating those directories, not from
+type-checking a file under `tests/` that imports one. This had been
+silently fine because every prior `tests/unit/**` import of `apps/api`
+source (`ExpiryService`, `AuditService`, `EmployeesService`) only ever
+reached a file using a bare class decorator (`@Injectable()`), which
+TypeScript's standard (non-experimental) decorators happen to accept.
+`apps/api/src/import-export/employee-row.ts` (E3 Phase 4, ADR-027) was the
+first to import `employees.controller.ts` (for its `createEmployeeSchema`
+export) -- a file with method decorators stacked with parameter decorators
+(`@Post() create(@Body() body: unknown, ...)`), which standard decorators
+do not support at all. `tests/unit/employee-row.test.ts` (also Phase 4)
+was therefore the first test to transitively trip this gap -- a real,
+CI-only failure mode this phase exists to surface.
+
+Decision: Extracted `createEmployeeSchema` into a new file,
+`apps/api/src/employees/employees.schemas.ts` -- plain zod, no NestJS
+imports at all -- and pointed both `employees.controller.ts` and
+`employee-row.ts` at it. This fixes the root cause (a "pure, DB-free"
+module transitively importing a decorated class was never actually pure)
+rather than papering over it by adding `experimentalDecorators` to the
+root tsconfig, which would only mask the same class of leak recurring
+elsewhere. `updateEmployeeSchema`/`searchSchema`/`idParamSchema` stay in
+the controller file -- nothing outside it needs them.
+
+Consequences: `npm run typecheck` (root-level, chaining `turbo typecheck`
++ the bare `tsc --noEmit -p tsconfig.json` that actually caught this) now
+passes cleanly, verified locally before re-pushing. No behavior change --
+`createEmployeeSchema`'s validation rules are byte-identical, just
+relocated. The general lesson -- any `tests/unit/**` file that imports
+`apps/api` source must resolve to files containing only class-level
+decorators, or the root tsconfig needs decorator support too -- is worth
+carrying into future phases: prefer extracting shared pure logic
+(schemas, pure functions) into their own non-decorated files rather than
+importing them out of a controller, exactly as ADR-027 already did for
+`matchReminderThreshold`-style pure cores in earlier phases.
