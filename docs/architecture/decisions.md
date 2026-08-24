@@ -755,17 +755,25 @@ PII-free completion signal (`{ tenantId, jobId, idempotencyKey, rowCount
 }`) after each batch finishes -- consistent with the reminder engine's
 queue-payload convention (ADR-025 decision #2 / ADR-026 decision #3).
 
-## ADR-028: E4 Pillar 1 -- root tsconfig lacked `experimentalDecorators`, silently tolerated until a unit test imported a NestJS controller
+## ADR-028: E4 Pillar 1 -- live CI verification findings
 
 Date: E4
 Status: ACCEPTED
 
 Context: E4 Pillar 1 is "push a branch/PR and confirm all 5 `ci.yml` jobs
 actually go green on a real GitHub Actions runner" -- exactly the
-verification ADR-024 left as its own final open item. The very first live
-run (PR #2) failed at the `lint` job's `npm run typecheck` step, never
-before caught locally across three prior phases of `npm run typecheck
---workspace=@ecs/api` calls. Root cause: the root `tsconfig.json` (which
+verification ADR-024 left as its own final open item. This never having
+actually run before meant it was expected to surface real,
+runner-only issues no amount of local `docker compose` testing had ever
+hit (the same class of gap ADR-024 itself flagged for `docker compose
+config`-only validation). Two did, across the first two live runs on
+PR #2 -- both fixed on the same branch before it merges.
+
+### Decision 1: root tsconfig lacked `experimentalDecorators`, silently tolerated until a unit test imported a NestJS controller
+
+The first live run failed at the `lint` job's `npm run typecheck` step,
+never before caught locally across three prior phases of `npm run
+typecheck --workspace=@ecs/api` calls. Root cause: the root `tsconfig.json` (which
 governs `tests/**/*.ts`, the only files it `include`s) has no
 `experimentalDecorators`/`emitDecoratorMetadata`, unlike every app-level
 tsconfig. TypeScript's *type-checking* still follows `import`s outside
@@ -784,7 +792,7 @@ do not support at all. `tests/unit/employee-row.test.ts` (also Phase 4)
 was therefore the first test to transitively trip this gap -- a real,
 CI-only failure mode this phase exists to surface.
 
-Decision: Extracted `createEmployeeSchema` into a new file,
+Fix: Extracted `createEmployeeSchema` into a new file,
 `apps/api/src/employees/employees.schemas.ts` -- plain zod, no NestJS
 imports at all -- and pointed both `employees.controller.ts` and
 `employee-row.ts` at it. This fixes the root cause (a "pure, DB-free"
@@ -792,16 +800,55 @@ module transitively importing a decorated class was never actually pure)
 rather than papering over it by adding `experimentalDecorators` to the
 root tsconfig, which would only mask the same class of leak recurring
 elsewhere. `updateEmployeeSchema`/`searchSchema`/`idParamSchema` stay in
-the controller file -- nothing outside it needs them.
+the controller file -- nothing outside it needs them. The general lesson
+-- any `tests/unit/**` file that imports `apps/api` source must resolve
+to files containing only class-level decorators, or the root tsconfig
+needs decorator support too -- is worth carrying into future phases:
+prefer extracting shared pure logic (schemas, pure functions) into their
+own non-decorated files rather than importing them out of a controller,
+exactly as ADR-027 already did for `matchReminderThreshold`-style pure
+cores in earlier phases.
 
-Consequences: `npm run typecheck` (root-level, chaining `turbo typecheck`
-+ the bare `tsc --noEmit -p tsconfig.json` that actually caught this) now
-passes cleanly, verified locally before re-pushing. No behavior change --
-`createEmployeeSchema`'s validation rules are byte-identical, just
-relocated. The general lesson -- any `tests/unit/**` file that imports
-`apps/api` source must resolve to files containing only class-level
-decorators, or the root tsconfig needs decorator support too -- is worth
-carrying into future phases: prefer extracting shared pure logic
-(schemas, pure functions) into their own non-decorated files rather than
-importing them out of a controller, exactly as ADR-027 already did for
-`matchReminderThreshold`-style pure cores in earlier phases.
+### Decision 2: `tests/integration/worker.test.ts`'s 10s `waitUntil` default was too tight for a cold GitHub Actions runner
+
+With Decision 1 fixed, `lint`/`unit-tests`/`test:security` all went green
+on the second live run, but `test:integration` failed:
+`WORKER-01`/`WORKER-03` (both timed out at ~10-11.6s) while
+`WORKER-02`/`WORKER-04`/`WORKER-05` passed in under half a second each.
+`worker.log` (dumped by the CI job's own failure-diagnostics step) showed
+why: `WORKER-02`'s job is discarded before ever opening a DB transaction
+(invalid payload, in-memory zod rejection only), so it's fast regardless
+of DB readiness; `WORKER-01` is the very first job in the whole suite that
+needs a real `db.transaction(...)` round-trip, and `apps/worker`'s `pg.Pool`
+(via `createDb()`, ADR-017) connects lazily on first query, not eagerly at
+startup (`min: 2` in the pool config is not a real `pg.Pool` option and has
+no effect). On this environment's long-running, already-warm dev
+containers that first-connection cost is invisible; on a freshly-started
+GitHub Actions Postgres container under load from Postgres+Redis+Keycloak+
+API+worker all booting at once, it was enough to blow past the test's
+fixed 10-second window. By the time `WORKER-04`/`WORKER-05` ran, the pool
+was already warm from `WORKER-01`/`WORKER-03`'s (eventually successful, per
+the job IDs and log lines both showing up) attempts, so they were fast.
+This is exactly the same class of "CI-runner startup latency the local
+dev environment never surfaces" ADR-024 decision #7 already hit for
+Keycloak's realm endpoint -- a timing issue, not a dropped job (BullMQ's
+Redis-backed queue does not lose jobs regardless of consumer timing) or a
+logic bug.
+
+Fix: Raised `waitUntil`'s default `timeoutMs` from `10000` to `30000`
+(`tests/integration/worker.test.ts`). Comfortably inside vitest's global
+45s `testTimeout` (`vitest.config.ts`), generous enough for a cold
+first-connection on a loaded runner, and still low enough to fail loudly
+if a job were genuinely never processed. `WORKER-05`'s already-explicit
+`15000ms` override was left as-is -- it runs after the pool is warm and
+passed on both live runs.
+
+Consequences: All 5 `ci.yml` jobs pass end-to-end on a real GitHub Actions
+run (PR #2), closing ADR-024's last open item. No production code changed
+in Decision 2 -- test timing only. Neither fix touches RLS, auth, tenant
+isolation, or a migration. Local `docker compose`-based verification
+remains valuable but is now confirmed insufficient on its own to catch
+either class of issue found here (a root-tsconfig/decorator interaction,
+and runner-cold-start timing) -- a live CI run should be re-checked after
+any future phase that adds a new `tests/unit` import path into `apps/api`
+source, or a new worker job type.

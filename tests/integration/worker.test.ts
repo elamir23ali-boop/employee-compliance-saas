@@ -46,7 +46,7 @@ async function notificationLogStatus(documentId: string, daysBeforeExpiry: numbe
   }
 }
 
-async function waitUntil(predicate: () => Promise<boolean>, timeoutMs = 10000, intervalMs = 250): Promise<boolean> {
+async function waitUntil(predicate: () => Promise<boolean>, timeoutMs = 30000, intervalMs = 250): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (await predicate()) return true;
