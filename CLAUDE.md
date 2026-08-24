@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E4 in progress — Production Readiness (Pillar 1 complete: live CI verification)
+## Current Phase: E4 in progress — Production Readiness (Pillars 1-2 complete: live CI verification, containerization)
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -65,7 +65,18 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   SUPPRESSED path violated `notification_log`'s real FK to `documents`,
   100% reproducible, masked in this environment for two full phases by a
   stale `idempotency_keys` row predating that code path. See ADR-028 for
-  both. Remaining E4 pillars (containerization/image scanning, real
+  both.
+- Pillar 2 (containerization & image security) complete: production
+  Dockerfiles for `apps/api`/`apps/worker` (`turbo prune --docker`,
+  4-stage build, non-root user, no dev dependencies in the final layer),
+  `hadolint` in the `lint` job, and a Trivy image scan in the `build` job
+  (deliberately not `security-scan` — see ADR-029). Two more real,
+  previously-invisible bugs surfaced building from scratch: a
+  `turbo prune` limitation (doesn't follow `tsconfig`'s `extends`) and a
+  genuine `@types/eslint-scope` version conflict masked by this
+  environment's stable `node_modules` — both fixed, see ADR-029. No
+  registry push, no orchestration manifests, no `HEALTHCHECK` — all still
+  explicitly deferred (deployment topology). Remaining E4 pillars (real
   notification delivery, failure observability) not yet started.
 
 ## ABSOLUTE PROHIBITIONS

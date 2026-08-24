@@ -24,6 +24,24 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
 
+      # E4 Pillar 2: lint-time feedback on the two production Dockerfiles,
+      # cheapest stage to catch a bad one in. failure-threshold: warning
+      # accepts DL3066 (info -- USER apiuser/workeruser by name, not a
+      # numeric uid, which is intentional for readability); DL3018 (pin apk
+      # package versions) is suppressed inline in both Dockerfiles with a
+      # documented `hadolint ignore` -- see ADR-029.
+      - name: Lint apps/api/Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: apps/api/Dockerfile
+          failure-threshold: warning
+
+      - name: Lint apps/worker/Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: apps/worker/Dockerfile
+          failure-threshold: warning
+
   unit-tests:
     needs: lint
     runs-on: ubuntu-latest
@@ -199,13 +217,11 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=high
 
-      # No Dockerfiles/container images exist in this repo yet (no production
-      # deployment topology -- see docs/architecture/threat-model.md,
-      # "Explicitly out of scope for E0/E1"), so there is nothing for Trivy
-      # to scan as an image. `trivy fs` is the applicable equivalent today:
-      # it scans the dependency tree and repo filesystem for known CVEs and
-      # misconfigurations. Re-add an image scan when a Dockerfile is
-      # introduced in a later phase.
+      # Source/dependency-tree scan. The image scan (E4 Pillar 2's two
+      # Dockerfiles) runs in the `build` job instead, right after the
+      # images are actually built there -- this job runs *before* `build`
+      # in the pipeline, so no image exists yet at this point to scan. See
+      # ADR-029 for why that's a deliberate placement, not an oversight.
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -233,3 +249,35 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run build
+
+      # E4 Pillar 2: build context is the repo root for both -- see the
+      # comment at the top of each Dockerfile for why (npm workspace deps).
+      # Local tags only, never pushed to a registry -- deployment topology
+      # (where these images would actually go) remains explicitly
+      # out of scope. See ADR-029.
+      - name: Build apps/api image
+        run: docker build -f apps/api/Dockerfile -t ecs-api:ci .
+
+      - name: Build apps/worker image
+        run: docker build -f apps/worker/Dockerfile -t ecs-worker:ci .
+
+      # Same severity/exit-code/ignore-unfixed policy as security-scan's
+      # `trivy fs` step -- one consistent vulnerability gate across the
+      # whole pipeline, not two different ones.
+      - name: Trivy image scan (apps/api)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ecs-api:ci
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Trivy image scan (apps/worker)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ecs-worker:ci
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
