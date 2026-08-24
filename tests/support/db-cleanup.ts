@@ -12,7 +12,15 @@ import { Client } from 'pg';
 // is test-teardown infrastructure, not application runtime code -- the
 // "NEVER hard-delete employees/documents" rule in CLAUDE.md governs
 // EmployeesService/DocumentsService, not test fixtures.
-const TEST_EMPLOYEE_CODE_PREFIXES = ['EMP-E2-', 'EMP-RBAC-', 'EMP-LOCK-', 'EMP-RLS-'];
+const TEST_EMPLOYEE_CODE_PREFIXES = [
+  'EMP-E2-',
+  'EMP-RBAC-',
+  'EMP-LOCK-',
+  'EMP-RLS-',
+  'EMP-REM-',
+  'EMP-IMP-',
+  'EMP-DASH-',
+];
 
 export async function cleanupE2TestEmployees(): Promise<void> {
   const url = process.env.DATABASE_MIGRATION_URL;
@@ -22,7 +30,18 @@ export async function cleanupE2TestEmployees(): Promise<void> {
   try {
     const likeClause = TEST_EMPLOYEE_CODE_PREFIXES.map((_, i) => `employee_code LIKE $${i + 1}`).join(' OR ');
     const params = TEST_EMPLOYEE_CODE_PREFIXES.map((p) => `${p}%`);
-    // documents.employee_id has no ON DELETE CASCADE -- remove dependents first.
+    // documents.employee_id and notification_log.document_id have no ON
+    // DELETE CASCADE -- remove dependents first, deepest first
+    // (notification_log -> documents -> employees). notification_log is
+    // otherwise append-only by GRANT (E3); this is test-teardown
+    // infrastructure via migration_user (BYPASSRLS), not application
+    // runtime code, same rationale already given above for the hard delete.
+    await client.query(
+      `DELETE FROM notification_log WHERE document_id IN (
+         SELECT id FROM documents WHERE employee_id IN (SELECT id FROM employees WHERE ${likeClause})
+       )`,
+      params,
+    );
     await client.query(
       `DELETE FROM documents WHERE employee_id IN (SELECT id FROM employees WHERE ${likeClause})`,
       params,

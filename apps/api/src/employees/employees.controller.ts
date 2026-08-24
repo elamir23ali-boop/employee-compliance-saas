@@ -21,7 +21,7 @@ import { buildAuditContext } from '../common/audit-context';
 import type { AuthenticatedRequest } from '../common/request.types';
 import { EmployeesService } from './employees.service';
 
-const createEmployeeSchema = z.object({
+export const createEmployeeSchema = z.object({
   employeeCode: z.string().min(1).max(64),
   firstName: z.string().min(1).max(128),
   lastName: z.string().min(1).max(128),

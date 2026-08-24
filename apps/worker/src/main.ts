@@ -1,8 +1,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import IORedis from 'ioredis';
+import { Queue } from 'bullmq';
 import { createDb } from '@ecs/database';
-import { createReminderWorker } from './workers/reminder.worker';
+import { createReminderWorker, REMINDER_QUEUE_NAME } from './workers/reminder.worker';
+import { createReminderScanner, scheduleReminderScans } from './workers/reminder-scanner.worker';
 import { createImportWorker } from './workers/import.worker';
 
 function loadEnvLocal(): void {
@@ -31,11 +33,18 @@ async function bootstrap(): Promise<void> {
   const reminderWorker = createReminderWorker(db, connection);
   const importWorker = createImportWorker(db, connection);
 
+  const sendReminderQueue = new Queue(REMINDER_QUEUE_NAME, { connection });
+  const reminderScanner = createReminderScanner(db, sendReminderQueue, connection);
+  const reminderScanQueue = await scheduleReminderScans(connection);
+
   console.log('Worker process started (reminders, imports)');
 
   const shutdown = async (): Promise<void> => {
     await reminderWorker.close();
     await importWorker.close();
+    await reminderScanner.close();
+    await sendReminderQueue.close();
+    await reminderScanQueue.close();
     await connection.quit();
     await pool.end();
     process.exit(0);

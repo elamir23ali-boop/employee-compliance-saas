@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E2 complete — Employee Document Compliance Core
+## Current Phase: E3 complete — CI/CD Hardening, Reminder Engine, Excel Import/Export, Dashboard APIs
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -20,8 +20,41 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   integration → security-scan → build); the `integration` stage runs
   `docker compose` (Postgres+Redis+Keycloak) plus the API/worker processes,
   closing the ADR-023 CI gap for `test:security`/`test:integration`'s
-  HTTP+Keycloak-dependent tests. See ADR-024. Remaining E3 pillars (reminder
-  engine, Excel import/export, dashboard APIs) not yet started.
+  HTTP+Keycloak-dependent tests. See ADR-024.
+- E3 Phase 2 (schema for Pillars 2-4: `tenant_notification_policies`,
+  `notification_log`, `import_batches`, dashboard index) complete — see
+  ADR-025.
+- E3 Phase 3 (Pillar 2 — Reminder Engine) complete: a daily BullMQ scan
+  (`apps/worker/src/workers/reminder-scanner.worker.ts`) finds documents
+  crossing a tenant's configured reminder thresholds, enqueues per-document
+  jobs, and `reminder.worker.ts` dispatches (currently a log-only stub,
+  `EmailDispatcher`/`LogEmailDispatcher`) and records the outcome in
+  `notification_log`. A `GET`/`PATCH /api/v1/notification-policy` endpoint
+  (tenant-admin only) lets tenants view/edit their own cadence. See
+  ADR-026 for the cadence rule, the idempotency-on-terminal-outcome design,
+  and the stub-dispatcher decision. Real SMTP/SES sending remains
+  unimplemented (explicit gap, not a phase-scope oversight).
+- E3 Phase 4 (Pillar 3 — Excel Import/Export) complete: `POST
+  /api/v1/imports/employees` (hr-staff+) accepts an `.xlsx` upload,
+  processes each row in its own transaction (partial success is expected:
+  "43 succeeded, 5 failed"), upserts via the same `EmployeesService.create`/
+  `.update()` single-employee write path, and returns a batch summary plus
+  per-row error detail. Re-uploading identical bytes (SHA-256-matched) is
+  idempotent (`import_batches.file_hash`, ADR-025). `GET
+  /api/v1/imports/:id` re-fetches a batch's stored summary; `GET
+  /api/v1/exports/employees` (hr-manager+) downloads an `.xlsx` of active
+  employees. See ADR-027 for the per-row-transaction/reused-write-path
+  design and the `exceljs`→`uuid` accepted residual `npm audit` finding.
+- E3 Phase 5 (Pillar 4 — Dashboard APIs) complete, closing out E3: three
+  read-only, viewer-level endpoints built directly on ADR-025's
+  dashboard-specific indexes — `GET /api/v1/dashboard/summary` (total +
+  zero-filled per-`ExpiryStatus` counts, `idx_documents_status`), `GET
+  /api/v1/dashboard/document-stats` (per-`(docType, expiryStatus)` counts,
+  `idx_documents_type_status`), and `GET /api/v1/dashboard/expiring`
+  (paginated, `?withinDays=`/`?docType=`-filterable, `idx_documents_expiry`).
+  No new tables/columns/indexes/RLS — pure query work, no ADR needed.
+  Employee headcount/department stats were explicitly scoped out (no
+  supporting index; would need its own migration).
 
 ## ABSOLUTE PROHIBITIONS
 
@@ -105,7 +138,7 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   with a mocked Drizzle handle), `npm run test:security`, `npm run test:integration`
   (both HTTP-driven: require `docker compose up` — Postgres+Redis+Keycloak —
   plus the API (`apps/api`) and worker (`apps/worker`) processes running locally)
-- Current state: 85/85 passing (31 unit / 32 security / 22 integration)
+- Current state: 128/128 passing (53 unit / 46 security / 29 integration)
 - **CI gap (ADR-023) addressed in E3 Pillar 1 (ADR-024), pending live verification:**
   `.github/workflows/ci.yml`'s `integration` job now runs `docker compose`
   (Postgres+Redis+Keycloak) directly on the runner — not GitHub Actions

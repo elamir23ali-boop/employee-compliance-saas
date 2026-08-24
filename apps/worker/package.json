@@ -16,6 +16,7 @@
   "dependencies": {
     "@ecs/database": "*",
     "bullmq": "^5.34.0",
+    "date-fns": "^4.4.0",
     "drizzle-orm": "^0.45.2",
     "ioredis": "^5.4.1",
     "pg": "^8.13.1",

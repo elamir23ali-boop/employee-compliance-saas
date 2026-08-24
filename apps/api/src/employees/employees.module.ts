@@ -9,5 +9,6 @@ import { EmployeesService } from './employees.service';
   imports: [TenantModule, RbacModule, AuditModule],
   controllers: [EmployeesController],
   providers: [EmployeesService],
+  exports: [EmployeesService],
 })
 export class EmployeesModule {}

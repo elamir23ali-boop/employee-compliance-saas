@@ -609,3 +609,148 @@ policy text used by every table since ADR-003 (`NULLIF(current_setting(...),
 review, only new tables using the existing one. `docs/architecture/data-classification.md`
 is updated alongside this ADR per its own instruction to extend the table
 "when a future phase introduces new data."
+
+## ADR-026: Reminder Engine (E3 Phase 3) -- cadence, idempotency-on-terminal-outcome, and a stub dispatcher
+
+Date: E3
+Status: ACCEPTED
+
+Context: Phase 3 builds the actual Reminder Engine against ADR-025's schema
+(`tenant_notification_policies`, `notification_log`). Three decisions here
+are non-obvious enough to record before/alongside implementation, per the
+Review Gates rule's spirit (this touches worker/tenant-context code, not
+RLS/auth/migrations themselves, so it is not a hard gate, but the
+reasoning is worth the same treatment ADR-020 gave the audit SAVEPOINT
+logic).
+
+Decision:
+1. **Reminder cadence is an exact-day match**, not "any day within the
+   widest configured window" (unlike the Expiry Engine's `EXPIRING_SOON`
+   check). `apps/worker/src/workers/reminder-policy.ts`'s
+   `matchReminderThreshold(daysUntilExpiry, reminderDaysBefore)` returns a
+   threshold only when `daysUntilExpiry` equals one of the tenant's
+   configured values. This fires each threshold exactly once per document
+   instead of resending on every day of the window; `notification_log` is
+   the source of truth for "already sent this exact threshold."
+2. **The `idempotency_keys` row is claimed only on a terminal outcome
+   (`SENT` or `SUPPRESSED`), never on `FAILED`.** A naive
+   "claim-key-then-do-work" ordering (the existing E0 pattern, fine for a
+   pure dedup check) would permanently block retry of a transient dispatch
+   failure, since the daily scan's own dedup check
+   (`notification_log` has no `SENT` row yet -> re-enqueue) would never fire
+   once a key exists. `apps/worker/src/workers/reminder.worker.ts` instead:
+   commits a `FAILED` row to `notification_log` on a dispatch exception
+   (so the failure is visible) but does *not* insert into
+   `idempotency_keys`, and does not rethrow (avoiding an immediate BullMQ
+   retry storm on top of the next day's scan-driven retry).
+   `SUPPRESSED` (document no longer found, or the employee has no email on
+   file) *does* claim the key, since neither condition is fixed by
+   retrying. This is the same class of reasoning as ADR-020's SAVEPOINT
+   decision -- a "must not permanently block on one failure mode" -- just
+   solved here by choosing what gets committed, rather than by a
+   SAVEPOINT, since this transaction owns its own outcome record rather
+   than being a side-channel off a caller's business transaction.
+3. **Email sending is a log-only stub this phase.** No SMTP/SES provider or
+   credentials exist anywhere in this repo. `apps/worker/src/notifications/email-dispatcher.ts`
+   defines an `EmailDispatcher` interface; the only implementation,
+   `LogEmailDispatcher`, writes one structured, PII-free log line (a
+   `documentId` prefix only -- never the email address, per CLAUDE.md's
+   "NEVER log PII") and never throws. `reminder.worker.ts` takes the
+   dispatcher as an injected, defaulted parameter specifically so a real
+   transport can be substituted later without touching the
+   transaction/notification-log logic in decision #2.
+4. Scanning is a self-repeating BullMQ job inside `apps/worker`
+   (`reminder-scans` queue, daily cron), not a `@nestjs/schedule` job in
+   the API -- consistent with ADR-016's "apps/worker owns all time-based/
+   background work." It iterates active tenants (`tenants` has no RLS
+   policy by design, so this outer read needs no tenant context) and opens
+   one transaction per tenant with `SET LOCAL app.current_tenant_id`
+   before touching any RLS-protected table, exactly like the existing
+   worker's per-job tenant validation.
+
+Consequences: A transient dispatch failure self-heals within at most one
+scan cycle (today, daily) without needing BullMQ retry/backoff
+configuration. `notification_log` accumulates one row per attempt
+(including retried `FAILED` attempts before an eventual `SENT`), which is
+intended -- it is an attempt log, not a dedup table; `idempotency_keys` is
+the dedup mechanism, and only for jobs that reached a terminal outcome. No
+change to `documents`/`employees` RLS, auth, or migrations. Real email
+delivery (SMTP/SES, credentials, retry/backoff tuning for actual transient
+network errors) remains an explicit gap for a later phase.
+
+A real, pre-existing latent bug surfaced by actually running the new worker
+integration tests against a live stack (not caught by `docker compose
+config` alone, the same class of gap ADR-024 already flagged for that kind
+of validation): `notification_log.document_id` has no `ON DELETE CASCADE`
+back to `documents`, so `tests/support/db-cleanup.ts`'s existing
+`cleanupE2TestEmployees()` -- which already deletes `documents` before
+`employees` for the same FK reason -- started failing once a test document
+had a `notification_log` row. Fixed by adding a third, deepest-first delete
+(`notification_log` -> `documents` -> `employees`) to that same helper.
+`notification_log` itself is not swept otherwise (append-only by GRANT,
+same rationale the helper already documents for not sweeping
+`audit_events`).
+
+## ADR-027: Excel Import/Export (E3 Phase 4) -- per-row transactions, reused write paths, and the exceljs/uuid residual risk
+
+Date: E3
+Status: ACCEPTED
+
+Context: Phase 4 builds bulk employee import (`.xlsx` upload) and export
+against ADR-025's `import_batches` schema. Confirmed with the user before
+implementation: employees only (no documents in the same row), and
+synchronous processing (the response returns per-row error detail
+directly, since `import_batches` has no column to persist it). Three
+decisions here are worth recording alongside ADR-020/ADR-026's precedent
+for "a step that must not be allowed to poison/block on one failure mode."
+
+Decision:
+1. **Each row is processed in its own transaction**, not one shared
+   transaction with SAVEPOINTs. Unlike `AuditService.log()` (ADR-020),
+   where the audit write is a side-channel that must never be allowed to
+   poison a caller's business transaction, here each row's write *is* the
+   primary unit of work -- there is no outer business transaction to
+   protect. Per-row transactions give "43 succeeded, 5 failed" partial-
+   failure semantics directly, with no SAVEPOINT bookkeeping needed.
+2. **Row upserts call `EmployeesService.create()`/`.update()` directly**
+   (`apps/api/src/import-export/import.service.ts`'s `upsertEmployeeRow`),
+   rather than re-implementing employee-write logic a second time. A row
+   matching an existing `employeeCode` reads that row's current `version`
+   first, then calls `.update()` with it -- if a genuine concurrent
+   modification lands between that read and the call, `.update()`'s own
+   `WHERE version = ...` guard still catches it and throws a
+   `ConflictException`, which is caught and reported as a row error
+   exactly like any other row failure. This is not a weaker check than a
+   single-record PATCH gets; it's the same optimistic-locking guarantee,
+   just supplied by the import service reading the version itself instead
+   of requiring a spreadsheet author to know it in advance (impractical).
+   A row matching an *archived* employee's code is rejected as a row error
+   rather than silently reviving it -- no restore endpoint exists yet even
+   for a single employee, despite `EMPLOYEE_RESTORED` existing as an
+   already-defined but unused `AuditAction`.
+3. **`exceljs` (not `xlsx`/SheetJS)**, memory-only `multer` storage (never
+   written to disk), a 5 MB upload cap, and a 5,000-row cap. `exceljs`
+   pulls in `uuid <11.1.1` (`GHSA-w5hq-g745-h8pq`, a buffer-bounds-check
+   issue only reachable when a caller supplies its own buffer to `uuid`,
+   which `exceljs` does not) as a moderate `npm audit` finding; `npm audit
+   --audit-level=high` (the actual CI gate) still exits 0, so this is
+   accepted the same way ADR-019 accepted `drizzle-kit`'s esbuild-kit
+   chain -- a documented residual risk, not a blocker. `npm audit fix
+   --force` would downgrade `exceljs` to `3.4.0`, a breaking change not
+   justified by a moderate, low-reachability finding.
+
+Consequences: A single malformed row never aborts an otherwise-good
+import. `notification_log`-style "attempt log, not dedup table" reasoning
+doesn't apply here -- `import_batches` stores only aggregate counts
+(`totalRows`/`processedRows`/`errorRows`), so per-row error detail is
+returned in the HTTP response only and is not retrievable later; a repeat
+`GET /api/v1/imports/:id` after the original request only ever shows the
+summary. Re-uploading the identical file bytes (same SHA-256) returns the
+original batch unchanged, per ADR-025 decision #3 -- including on that
+replay, `errors` is always `[]`, since detail was never persisted. No
+change to `documents`/`employees` RLS, auth, or migrations. `apps/worker`'s
+existing `import.worker.ts` stub (E0-era) is unchanged; the API's new
+`ImportQueueService` gives it its first real caller, enqueuing one
+PII-free completion signal (`{ tenantId, jobId, idempotencyKey, rowCount
+}`) after each batch finishes -- consistent with the reminder engine's
+queue-payload convention (ADR-025 decision #2 / ADR-026 decision #3).
