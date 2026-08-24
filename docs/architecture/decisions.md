@@ -809,46 +809,69 @@ own non-decorated files rather than importing them out of a controller,
 exactly as ADR-027 already did for `matchReminderThreshold`-style pure
 cores in earlier phases.
 
-### Decision 2: `tests/integration/worker.test.ts`'s 10s `waitUntil` default was too tight for a cold GitHub Actions runner
+### Decision 2: `reminder.worker.ts`'s "document not found" SUPPRESSED write violates a real FK constraint -- masked locally for two phases by a stale `idempotency_keys` row
 
 With Decision 1 fixed, `lint`/`unit-tests`/`test:security` all went green
-on the second live run, but `test:integration` failed:
-`WORKER-01`/`WORKER-03` (both timed out at ~10-11.6s) while
-`WORKER-02`/`WORKER-04`/`WORKER-05` passed in under half a second each.
-`worker.log` (dumped by the CI job's own failure-diagnostics step) showed
-why: `WORKER-02`'s job is discarded before ever opening a DB transaction
-(invalid payload, in-memory zod rejection only), so it's fast regardless
-of DB readiness; `WORKER-01` is the very first job in the whole suite that
-needs a real `db.transaction(...)` round-trip, and `apps/worker`'s `pg.Pool`
-(via `createDb()`, ADR-017) connects lazily on first query, not eagerly at
-startup (`min: 2` in the pool config is not a real `pg.Pool` option and has
-no effect). On this environment's long-running, already-warm dev
-containers that first-connection cost is invisible; on a freshly-started
-GitHub Actions Postgres container under load from Postgres+Redis+Keycloak+
-API+worker all booting at once, it was enough to blow past the test's
-fixed 10-second window. By the time `WORKER-04`/`WORKER-05` ran, the pool
-was already warm from `WORKER-01`/`WORKER-03`'s (eventually successful, per
-the job IDs and log lines both showing up) attempts, so they were fast.
-This is exactly the same class of "CI-runner startup latency the local
-dev environment never surfaces" ADR-024 decision #7 already hit for
-Keycloak's realm endpoint -- a timing issue, not a dropped job (BullMQ's
-Redis-backed queue does not lose jobs regardless of consumer timing) or a
-logic bug.
+on the second live run, but `test:integration` failed: `WORKER-01`/
+`WORKER-03` (both timed out) while `WORKER-02`/`WORKER-04`/`WORKER-05`
+passed quickly. First hypothesis was CI-runner cold-start latency
+(`pg.Pool` connects lazily on first query, and this environment's
+long-running dev containers never show that cost) -- raising
+`waitUntil`'s default timeout from 10s to 30s (still comfortably inside
+vitest's 45s `testTimeout`) did *not* fix it on a third live run, which
+ruled that out and pointed at something structural instead.
 
-Fix: Raised `waitUntil`'s default `timeoutMs` from `10000` to `30000`
-(`tests/integration/worker.test.ts`). Comfortably inside vitest's global
-45s `testTimeout` (`vitest.config.ts`), generous enough for a cold
-first-connection on a loaded runner, and still low enough to fail loudly
-if a job were genuinely never processed. `WORKER-05`'s already-explicit
-`15000ms` override was left as-is -- it runs after the pool is warm and
-passed on both live runs.
+`worker.log`'s job-level detail (BullMQ's own `getFailed()`, queried
+directly, not just the test's own log lines) showed the real cause:
+`WORKER-01`/`WORKER-03` use a deliberately nonexistent
+`documentId: '00000000-0000-0000-0000-000000000000'` to exercise the
+"document not found" path added in E3 Phase 3 (ADR-026). That path
+inserted `notificationLog` with `documentId` set to that same nonexistent
+value -- but `notification_log.document_id` has a real
+`REFERENCES documents(id)` foreign key (ADR-025), so the insert always
+throws a foreign-key violation, uncaught (only the dispatcher call itself
+is wrapped in try/catch), failing the whole job on every single attempt,
+in every environment, deterministically -- confirmed by reproducing it
+directly against this environment's own live Postgres (`docker exec ...
+psql`) and by manually re-enqueueing the identical job through a running
+local worker.
+
+This had been silently broken since Phase 3 and invisible in **every**
+prior local test run across Phases 3, 4, and 5: `idem-w01`/`idem-w03` (the
+test's hardcoded idempotency keys) already had rows in this environment's
+`idempotency_keys` table with a `created_at` predating this code path
+entirely -- left over from when `reminder.worker.ts` was still the
+E0-era stub that only did idempotency-key bookkeeping and never touched
+`documents`/`notification_log` at all. Every subsequent local run's
+`idempotencyKeyCount('idem-w01') === 1` check was satisfied by that
+ancient row, never by the current attempt actually succeeding -- so the
+job failed identically every time locally too (confirmed: this
+environment's Redis had 31 failed `reminders`-queue jobs accumulated,
+unnoticed, before this investigation), it just never surfaced as a test
+failure. A fresh CI Postgres container, with no such leftover row, was
+the first thing to honestly report it.
+
+Fix: `apps/worker/src/workers/reminder.worker.ts`'s "document not found"
+branch now inserts `documentId: null` (the column is nullable exactly for
+this case) instead of the nonexistent id. The stale `idem-w01`/`idem-w03`
+rows were deleted from this environment's `idempotency_keys` table so
+local runs exercise the real code path going forward instead of a
+two-phase-old cached answer. The `waitUntil` timeout increase (10s -> 30s)
+was kept as reasonable headroom for genuine CI-runner variance, even
+though it wasn't the actual fix.
 
 Consequences: All 5 `ci.yml` jobs pass end-to-end on a real GitHub Actions
-run (PR #2), closing ADR-024's last open item. No production code changed
-in Decision 2 -- test timing only. Neither fix touches RLS, auth, tenant
-isolation, or a migration. Local `docker compose`-based verification
-remains valuable but is now confirmed insufficient on its own to catch
-either class of issue found here (a root-tsconfig/decorator interaction,
-and runner-cold-start timing) -- a live CI run should be re-checked after
-any future phase that adds a new `tests/unit` import path into `apps/api`
-source, or a new worker job type.
+run (PR #2), closing ADR-024's last open item -- verified with a clean
+local `idempotency_keys` table too, not just in CI. This was a real,
+user-facing bug: any reminder job whose document was deleted between scan
+time and dispatch time (the exact race ADR-026 designed the SUPPRESSED
+path to handle) would have failed with an unhandled FK violation in
+production, forever, with no notification_log row and no idempotency key
+ever claimed for it -- silently retried by nothing, observable only via
+BullMQ's own internal failed-job state, which E4 Pillar 4 (Failure
+Observability) does not yet monitor. Worth generalizing: a long-lived,
+never-reset local Postgres volume can mask a real regression for as long
+as a test's identifying keys stay hardcoded and reused across runs --
+prefer unique/random keys per test invocation where practical, or treat
+"does this pass against a Postgres volume that has never seen this test
+before" as part of what a live CI run is actually for.
