@@ -20,17 +20,7 @@ import { Roles } from '../rbac/roles.decorator';
 import { buildAuditContext } from '../common/audit-context';
 import type { AuthenticatedRequest } from '../common/request.types';
 import { EmployeesService } from './employees.service';
-
-export const createEmployeeSchema = z.object({
-  employeeCode: z.string().min(1).max(64),
-  firstName: z.string().min(1).max(128),
-  lastName: z.string().min(1).max(128),
-  email: z.string().email().optional(),
-  department: z.string().max(128).optional(),
-  jobTitle: z.string().max(128).optional(),
-  branch: z.string().max(128).optional(),
-  responsibleOfficerId: z.string().max(128).optional(),
-});
+import { createEmployeeSchema } from './employees.schemas';
 
 const updateEmployeeSchema = z.object({
   firstName: z.string().min(1).max(128).optional(),

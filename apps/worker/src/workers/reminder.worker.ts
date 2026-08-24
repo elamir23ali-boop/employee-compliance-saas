@@ -93,9 +93,14 @@ export function createReminderWorker(
         const doc = docRows[0];
 
         if (!doc) {
+          // documentId itself doesn't exist (or is no longer in this
+          // tenant/not deleted) -- notification_log.document_id has a real
+          // FK to documents(id), so it can never reference this value.
+          // null is the only valid way to record "the document was gone by
+          // dispatch time" (nullable column, exactly for this case).
           await tx.insert(notificationLog).values({
             tenantId,
-            documentId,
+            documentId: null,
             daysBeforeExpiry,
             status: 'SUPPRESSED',
             errorMessage: 'document_not_found',

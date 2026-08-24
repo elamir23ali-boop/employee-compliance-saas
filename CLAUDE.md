@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E3 complete — CI/CD Hardening, Reminder Engine, Excel Import/Export, Dashboard APIs
+## Current Phase: E4 in progress — Production Readiness (Pillar 1 complete: live CI verification)
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -55,6 +55,18 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   No new tables/columns/indexes/RLS — pure query work, no ADR needed.
   Employee headcount/department stats were explicitly scoped out (no
   supporting index; would need its own migration).
+- **E4 in progress.** Pillar 1 (live CI verification) complete: all 5
+  `ci.yml` jobs confirmed green on a real GitHub Actions run for the first
+  time ever (PR #2), closing the verification gap ADR-024 left open. Two
+  real, previously-invisible bugs surfaced and were fixed on that branch:
+  (1) the root `tsconfig.json` lacked `experimentalDecorators`, silently
+  tolerated until E3 Phase 4 first imported a NestJS controller from a
+  `tests/unit` file; (2) `reminder.worker.ts`'s "document not found"
+  SUPPRESSED path violated `notification_log`'s real FK to `documents`,
+  100% reproducible, masked in this environment for two full phases by a
+  stale `idempotency_keys` row predating that code path. See ADR-028 for
+  both. Remaining E4 pillars (containerization/image scanning, real
+  notification delivery, failure observability) not yet started.
 
 ## ABSOLUTE PROHIBITIONS
 

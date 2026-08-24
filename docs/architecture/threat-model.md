@@ -45,6 +45,11 @@ apps/worker (BullMQ jobs carry tenantId in payload, not global state)
 
 No production deployment topology, no WAF/network-layer controls, no
 key-rotation procedure, no incident-response runbook, no billing/metering
-attack surface (billing doesn't exist yet -- see CLAUDE.md FORBIDDEN list).
-These belong to a later phase and should be added here when built, not
-speculated about now.
+attack surface (billing doesn't exist yet). These belong to a later phase
+and should be added here when built, not speculated about now.
+
+E4 (see `docs/architecture/decisions.md` ADR-028 onward) begins closing
+some of these: live CI verification, containerization/image scanning, real
+notification delivery, and failure observability. Deployment topology,
+WAF/network controls, key rotation, incident response, and billing remain
+open and out of scope until a phase explicitly claims them.

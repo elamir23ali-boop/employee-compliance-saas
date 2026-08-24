@@ -754,3 +754,124 @@ existing `import.worker.ts` stub (E0-era) is unchanged; the API's new
 PII-free completion signal (`{ tenantId, jobId, idempotencyKey, rowCount
 }`) after each batch finishes -- consistent with the reminder engine's
 queue-payload convention (ADR-025 decision #2 / ADR-026 decision #3).
+
+## ADR-028: E4 Pillar 1 -- live CI verification findings
+
+Date: E4
+Status: ACCEPTED
+
+Context: E4 Pillar 1 is "push a branch/PR and confirm all 5 `ci.yml` jobs
+actually go green on a real GitHub Actions runner" -- exactly the
+verification ADR-024 left as its own final open item. This never having
+actually run before meant it was expected to surface real,
+runner-only issues no amount of local `docker compose` testing had ever
+hit (the same class of gap ADR-024 itself flagged for `docker compose
+config`-only validation). Two did, across the first two live runs on
+PR #2 -- both fixed on the same branch before it merges.
+
+### Decision 1: root tsconfig lacked `experimentalDecorators`, silently tolerated until a unit test imported a NestJS controller
+
+The first live run failed at the `lint` job's `npm run typecheck` step,
+never before caught locally across three prior phases of `npm run
+typecheck --workspace=@ecs/api` calls. Root cause: the root `tsconfig.json` (which
+governs `tests/**/*.ts`, the only files it `include`s) has no
+`experimentalDecorators`/`emitDecoratorMetadata`, unlike every app-level
+tsconfig. TypeScript's *type-checking* still follows `import`s outside
+`include`/`exclude` boundaries -- `exclude: ["apps", "packages"]` only
+stops tsc from directly enumerating those directories, not from
+type-checking a file under `tests/` that imports one. This had been
+silently fine because every prior `tests/unit/**` import of `apps/api`
+source (`ExpiryService`, `AuditService`, `EmployeesService`) only ever
+reached a file using a bare class decorator (`@Injectable()`), which
+TypeScript's standard (non-experimental) decorators happen to accept.
+`apps/api/src/import-export/employee-row.ts` (E3 Phase 4, ADR-027) was the
+first to import `employees.controller.ts` (for its `createEmployeeSchema`
+export) -- a file with method decorators stacked with parameter decorators
+(`@Post() create(@Body() body: unknown, ...)`), which standard decorators
+do not support at all. `tests/unit/employee-row.test.ts` (also Phase 4)
+was therefore the first test to transitively trip this gap -- a real,
+CI-only failure mode this phase exists to surface.
+
+Fix: Extracted `createEmployeeSchema` into a new file,
+`apps/api/src/employees/employees.schemas.ts` -- plain zod, no NestJS
+imports at all -- and pointed both `employees.controller.ts` and
+`employee-row.ts` at it. This fixes the root cause (a "pure, DB-free"
+module transitively importing a decorated class was never actually pure)
+rather than papering over it by adding `experimentalDecorators` to the
+root tsconfig, which would only mask the same class of leak recurring
+elsewhere. `updateEmployeeSchema`/`searchSchema`/`idParamSchema` stay in
+the controller file -- nothing outside it needs them. The general lesson
+-- any `tests/unit/**` file that imports `apps/api` source must resolve
+to files containing only class-level decorators, or the root tsconfig
+needs decorator support too -- is worth carrying into future phases:
+prefer extracting shared pure logic (schemas, pure functions) into their
+own non-decorated files rather than importing them out of a controller,
+exactly as ADR-027 already did for `matchReminderThreshold`-style pure
+cores in earlier phases.
+
+### Decision 2: `reminder.worker.ts`'s "document not found" SUPPRESSED write violates a real FK constraint -- masked locally for two phases by a stale `idempotency_keys` row
+
+With Decision 1 fixed, `lint`/`unit-tests`/`test:security` all went green
+on the second live run, but `test:integration` failed: `WORKER-01`/
+`WORKER-03` (both timed out) while `WORKER-02`/`WORKER-04`/`WORKER-05`
+passed quickly. First hypothesis was CI-runner cold-start latency
+(`pg.Pool` connects lazily on first query, and this environment's
+long-running dev containers never show that cost) -- raising
+`waitUntil`'s default timeout from 10s to 30s (still comfortably inside
+vitest's 45s `testTimeout`) did *not* fix it on a third live run, which
+ruled that out and pointed at something structural instead.
+
+`worker.log`'s job-level detail (BullMQ's own `getFailed()`, queried
+directly, not just the test's own log lines) showed the real cause:
+`WORKER-01`/`WORKER-03` use a deliberately nonexistent
+`documentId: '00000000-0000-0000-0000-000000000000'` to exercise the
+"document not found" path added in E3 Phase 3 (ADR-026). That path
+inserted `notificationLog` with `documentId` set to that same nonexistent
+value -- but `notification_log.document_id` has a real
+`REFERENCES documents(id)` foreign key (ADR-025), so the insert always
+throws a foreign-key violation, uncaught (only the dispatcher call itself
+is wrapped in try/catch), failing the whole job on every single attempt,
+in every environment, deterministically -- confirmed by reproducing it
+directly against this environment's own live Postgres (`docker exec ...
+psql`) and by manually re-enqueueing the identical job through a running
+local worker.
+
+This had been silently broken since Phase 3 and invisible in **every**
+prior local test run across Phases 3, 4, and 5: `idem-w01`/`idem-w03` (the
+test's hardcoded idempotency keys) already had rows in this environment's
+`idempotency_keys` table with a `created_at` predating this code path
+entirely -- left over from when `reminder.worker.ts` was still the
+E0-era stub that only did idempotency-key bookkeeping and never touched
+`documents`/`notification_log` at all. Every subsequent local run's
+`idempotencyKeyCount('idem-w01') === 1` check was satisfied by that
+ancient row, never by the current attempt actually succeeding -- so the
+job failed identically every time locally too (confirmed: this
+environment's Redis had 31 failed `reminders`-queue jobs accumulated,
+unnoticed, before this investigation), it just never surfaced as a test
+failure. A fresh CI Postgres container, with no such leftover row, was
+the first thing to honestly report it.
+
+Fix: `apps/worker/src/workers/reminder.worker.ts`'s "document not found"
+branch now inserts `documentId: null` (the column is nullable exactly for
+this case) instead of the nonexistent id. The stale `idem-w01`/`idem-w03`
+rows were deleted from this environment's `idempotency_keys` table so
+local runs exercise the real code path going forward instead of a
+two-phase-old cached answer. The `waitUntil` timeout increase (10s -> 30s)
+was kept as reasonable headroom for genuine CI-runner variance, even
+though it wasn't the actual fix.
+
+Consequences: All 5 `ci.yml` jobs pass end-to-end on a real GitHub Actions
+run (PR #2), closing ADR-024's last open item -- verified with a clean
+local `idempotency_keys` table too, not just in CI. This was a real,
+user-facing bug: any reminder job whose document was deleted between scan
+time and dispatch time (the exact race ADR-026 designed the SUPPRESSED
+path to handle) would have failed with an unhandled FK violation in
+production, forever, with no notification_log row and no idempotency key
+ever claimed for it -- silently retried by nothing, observable only via
+BullMQ's own internal failed-job state, which E4 Pillar 4 (Failure
+Observability) does not yet monitor. Worth generalizing: a long-lived,
+never-reset local Postgres volume can mask a real regression for as long
+as a test's identifying keys stay hardcoded and reused across runs --
+prefer unique/random keys per test invocation where practical, or treat
+"does this pass against a Postgres volume that has never seen this test
+before" as part of what a live CI run is actually for.
