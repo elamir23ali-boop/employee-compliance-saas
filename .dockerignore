@@ -1,0 +1,15 @@
+# Belt-and-suspenders alongside `turbo prune --docker`'s own filtering in
+# apps/api/Dockerfile and apps/worker/Dockerfile -- .env.local in
+# particular must never be a candidate for COPY, full stop.
+node_modules
+**/node_modules
+**/dist
+**/coverage
+.git
+.env.local
+*.env
+!.env.example
+docs
+tests
+infra/docker
+.github

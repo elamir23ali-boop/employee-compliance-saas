@@ -875,3 +875,117 @@ as a test's identifying keys stay hardcoded and reused across runs --
 prefer unique/random keys per test invocation where practical, or treat
 "does this pass against a Postgres volume that has never seen this test
 before" as part of what a live CI run is actually for.
+
+## ADR-029: E4 Pillar 2 -- containerization, image scanning, and two more real bugs a build-from-scratch surfaced
+
+Date: E4
+Status: ACCEPTED
+
+Context: Closes ADR-024's other stated deferral -- production Dockerfiles
+for `apps/api`/`apps/worker`, `hadolint`, and a Trivy image scan. No
+orchestration manifests, no registry push, no actual deployment; that
+remains deployment topology, still out of scope (see
+`docs/architecture/threat-model.md`).
+
+Decision:
+1. **`turbo prune --docker` + a 4-stage build** (`pruner` -> `installer`
+   -> `prod-deps` -> `runner`) per Dockerfile, built from the repo root
+   (`docker build -f apps/api/Dockerfile .`) since both apps depend on the
+   real npm workspace packages `@ecs/database`/`@ecs/shared`, not
+   published ones. `runner` copies production `node_modules` from a
+   *separate* `npm ci --omit=dev` (`prod-deps`) plus only the built
+   `dist/`+`package.json` output from `installer` (whose `node_modules`
+   still has TypeScript/`@nestjs/cli`/etc. in it) -- `installer`'s
+   dev-dependency-laden `node_modules` never reaches the final image.
+2. **`turbo prune` does not follow `tsconfig.json`'s `extends`** -- it only
+   understands `package.json` dependencies. Every package's tsconfig
+   extends the root `tsconfig.base.json`, which is therefore absent from
+   `turbo prune`'s `out/json`/`out/full` output; every `tsc` invocation
+   inside the `installer` stage failed with `TS5083: Cannot read file
+   '/app/tsconfig.base.json'` until it was copied in by an explicit extra
+   `COPY --from=pruner /app/tsconfig.base.json ./tsconfig.base.json` step.
+   Not documented anywhere in turbo's own examples at the time of writing;
+   recorded here since it will recur for any future per-app Dockerfile
+   added to this repo.
+3. **A second real, pre-existing bug, unrelated to Docker but only ever
+   exercised by building fully from scratch**: `@ecs/shared`'s (and,
+   transitively, every other package's) `tsc` build failed inside the
+   pruned container with dozens of `TS2416`-class errors -- two different
+   installed versions of `@types/eslint-scope`/`eslint`'s own bundled
+   types disagreeing with each other in the global scope. TypeScript
+   includes every `@types/*` package found in `node_modules` by default
+   unless `compilerOptions.types` restricts it; `tsconfig.base.json`
+   never did, and this repo's `eslint`/`typescript-eslint`/`turbo`
+   root devDependencies are pinned to `"latest"` (not a fixed version) in
+   `package.json`. `skipLibCheck: true` (already set) does not protect
+   against two conflicting installed copies of the *same* ambient global
+   declaration -- it only skips checking a single `.d.ts` file's own
+   internal consistency, not a cross-version clash between two of them.
+   This had never surfaced in this environment's own `npm install`-managed
+   node_modules (a stable, incrementally-updated tree), only inside a
+   Docker build's from-scratch `npm ci` against `turbo prune`'s pruned
+   lockfile subset -- the same class of "only a truly fresh, from-scratch
+   environment tells the truth" lesson as ADR-028. Fixed by adding
+   `"types": ["node"]` to `packages/shared/tsconfig.json` and
+   `packages/database/tsconfig.json` (neither needs any ambient global
+   package), `"types": ["node"]` to `apps/worker/tsconfig.json`, and
+   `"types": ["node", "express", "multer"]` to `apps/api/tsconfig.json`
+   (it genuinely needs `Express.Multer.File`'s ambient global augmentation
+   for the file-upload controller, ADR-027). Verified with a full local
+   `npm run typecheck`/`lint`/`test:unit` pass before rebuilding the image.
+4. **Docker image build + Trivy image scan live in the `build` job, not
+   `security-scan`** -- a deliberate deviation from the E4 plan's literal
+   wording. `security-scan` runs *before* `build` in this pipeline
+   (`lint -> unit-tests -> integration -> security-scan -> build`), so no
+   image exists yet at that point to scan; building it twice (once to
+   scan, once to "officially" build) would double CI time for nothing.
+   Building and scanning once, in `build`, still gates the pipeline
+   identically (the job fails on a CRITICAL/HIGH finding) since `build`
+   is the last stage either way. Both new image-scan steps reuse
+   `security-scan`'s exact `trivy fs` policy (`severity: CRITICAL,HIGH`,
+   `exit-code: '1'`, `ignore-unfixed: true`, same pinned
+   `aquasecurity/trivy-action@v0.36.0`) -- one consistent vulnerability
+   gate across the whole pipeline, not two different ones.
+5. **`npm`/`npx`/`corepack` are deleted from the final `runner` stage.**
+   `node:24-alpine` ships them, and a first local Trivy scan
+   (`aquasec/trivy:latest image ecs-api:local`) found 8 CRITICAL/HIGH CVEs
+   -- all inside npm's *own* vendored dependencies (`tar`, `undici`,
+   `brace-expansion`, `ip-address`), none in this application's actual
+   dependency tree. Both images' `CMD` invokes `node` directly and never
+   `npm`/`npx` at runtime, so these files are pure attack surface with no
+   corresponding functionality lost. `RUN rm -rf
+   /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+   /usr/local/bin/corepack` in `runner`, after `USER` would already be
+   root-only anyway -- confirmed a rescan afterward shows zero
+   CRITICAL/HIGH findings in both images.
+6. **`hadolint` runs in the `lint` job** (`failure-threshold: warning`)
+   against both Dockerfiles. `DL3018` ("pin apk package versions") is
+   suppressed inline (`# hadolint ignore=DL3018`, comment placed
+   immediately above the `RUN` it applies to -- hadolint only honors an
+   ignore directive as the *last* comment line directly preceding the
+   instruction, not an earlier one in a multi-line comment block, found
+   empirically) since `libc6-compat` is build-only, never reaches
+   `runner`, and hard-pinning an Alpine package version would just
+   duplicate what the base image tag already pins, adding a second thing
+   to keep in sync for no real safety benefit. `DL3066` ("non-numeric
+   user-id") is accepted at its natural `info` severity -- `USER
+   apiuser`/`workeruser` by name is intentional, more readable than a raw
+   UID, and `failure-threshold: warning` doesn't gate on it.
+7. **No `HEALTHCHECK` instruction, no registry push, no orchestration
+   manifests this phase** -- a Docker healthcheck needs a real endpoint to
+   probe and none exists yet (adding one is a new feature, not
+   containerization); pushing anywhere or writing deployment manifests is
+   deployment topology, still explicitly deferred.
+
+Consequences: `ecs-api:local`/`ecs-worker:local` build successfully,
+verified end-to-end against this environment's live Postgres/Redis
+(`docker run --network e0-poc_default ...`) -- both start, the API
+responds `401` to an unauthenticated request exactly like every prior
+phase's smoke test, the worker logs its startup line, and both run as a
+non-root user (`apiuser`/`workeruser`, confirmed via `docker exec ...
+whoami`). Final image sizes ~74MB/~65MB compressed. Decisions 2 and 3 are
+real, pre-existing bugs neither Docker-specific nor previously
+discoverable any other way in this environment -- the same pattern
+ADR-028 already established: a from-scratch build is itself a test, and
+this repo has now hit that class of gap twice. No change to
+`documents`/`employees` RLS, auth, tenant isolation, or a migration.
