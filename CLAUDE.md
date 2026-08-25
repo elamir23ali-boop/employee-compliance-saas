@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E4 complete — Production Readiness (Pillars 1-4: live CI verification, containerization, real notification delivery, failure observability)
+## Current Phase: E5 complete — Production Configuration & Operational Hardening (Pillars 1-4: health endpoints + graceful shutdown, production config + secret contract + PgBouncer validation, operational runbooks, integration gate)
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -104,6 +104,55 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   tenant-configurable threshold yet, no dedup across scans. New index:
   `idx_notification_log_status_sent_at`. See ADR-031 for the cadence,
   denominator, and test-strategy decisions.
+- **E5 complete — Production Configuration & Operational Hardening
+  (Pillars 1-4).** Pillar 1 (health endpoints + graceful shutdown):
+  `GET /health` (always 200) and `GET /health/ready`
+  (`apps/api/src/health/`, DB `SELECT 1` + Redis `PING`, 200/`ready` or
+  503/`not_ready`) are deliberately unauthenticated — no `@UseGuards`,
+  since no global auth guard exists in this repo. The ready/not-ready
+  decision is a pure function (`readiness.util.ts`), unit-tested directly
+  against db/redis ok/fail combinations. `apps/api`/`apps/worker` both
+  gained explicit SIGTERM/SIGINT handlers with structured, PII-free
+  logging; the API drains its HTTP server (stop new connections, finish
+  in-flight requests, 30s cap) *before* closing the DB pool — NestJS's own
+  `app.close()` runs `OnModuleDestroy` before closing the HTTP server
+  (confirmed against `@nestjs/core`'s own source), which would otherwise
+  fail requests still in flight during drain. Verified against the real
+  production Docker images (`docker stop`, a genuine Linux SIGTERM — not
+  emulable from this dev machine's Windows host) rather than assumed.
+- Pillar 2 (production config + secret contract): `.env.production.example`
+  (every env var the system actually reads, `CHANGE_ME` placeholders) and
+  `infra/docker/docker-compose.production.yml` (built images, no dev
+  deps/MailHog, resource limits + `restart: unless-stopped` everywhere,
+  API healthcheck wired to `/health/ready`; Keycloak deliberately excluded
+  — productionizing an identity provider is a distinct concern from this
+  phase's four pillars). `packages/shared` gained a `SecretLoader`
+  interface (`EnvSecretLoader`, wired everywhere today;
+  `AwsSecretsManagerLoader`, an explicit not-implemented E6 stub — no
+  `@aws-sdk` runtime dependency added). See ADR-032: whether PgBouncer's
+  transaction pooling mode is safe with this repo's `SET LOCAL`-based
+  tenant-context pattern was tested for real (`edoburu/pgbouncer` against
+  this environment's live Postgres, 4 scenarios including 20 concurrent
+  transactions) rather than assumed — zero cross-transaction leakage in
+  every case.
+- Pillar 3 (operational runbooks):
+  `docs/runbooks/{deploy,rollback-migration,restart-worker,
+  investigate-failed-notifications}.md`. Every copy-pasteable command was
+  run for real against the live stack, which surfaced two real
+  discrepancies from what a generic runbook assumed: no manual reminder
+  re-scan HTTP endpoint exists anywhere in this repo (documented the real
+  BullMQ-queue-enqueue mechanism instead, verified end-to-end); the real
+  failure-observability endpoint is `GET /api/v1/notification-log/stats`
+  (E4 Pillar 4), not a `/health`-style route. Also documented a genuine
+  pre-existing gap: `infra/postgres/migrate.js` has no applied-migration
+  tracking (no `schema_migrations` table) — it was only ever built to
+  bootstrap a fresh database, not to apply new migrations incrementally
+  against one that already has some applied.
+- Pillar 4 (integration gate) closes out E5: 159/159 tests passing (71
+  unit / 52 security / 36 integration), typecheck/lint clean, `npm audit
+  --audit-level=high` exit 0 (6 pre-existing moderate findings only,
+  ADR-019/ADR-027), all 5 CI jobs green on a real GitHub Actions run (PR
+  #6). `E5_GATE.md` records the final state; tagged `e5-complete`.
 
 ## ABSOLUTE PROHIBITIONS
 
@@ -187,7 +236,7 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   with a mocked Drizzle handle), `npm run test:security`, `npm run test:integration`
   (both HTTP-driven: require `docker compose up` — Postgres+Redis+Keycloak —
   plus the API (`apps/api`) and worker (`apps/worker`) processes running locally)
-- Current state: 128/128 passing (53 unit / 46 security / 29 integration)
+- Current state: 159/159 passing (71 unit / 52 security / 36 integration)
 - **CI gap (ADR-023) addressed in E3 Pillar 1 (ADR-024), pending live verification:**
   `.github/workflows/ci.yml`'s `integration` job now runs `docker compose`
   (Postgres+Redis+Keycloak) directly on the runner — not GitHub Actions
