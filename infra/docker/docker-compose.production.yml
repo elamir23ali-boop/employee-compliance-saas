@@ -1,0 +1,144 @@
+## E5 Pillar 2: standalone production compose stack for apps/api + apps/worker
+## plus the Postgres/Redis they depend on. Distinct from docker-compose.yml
+## (local dev: bind-mounts source, seeds Postgres via
+## docker-entrypoint-initdb.d, runs MailHog as an SMTP test double, runs
+## api/worker via `npm run start` on the host, not as containers) --
+## this file runs the actual built images (apps/api/Dockerfile,
+## apps/worker/Dockerfile, ADR-029) with no dev dependencies and no test
+## utilities.
+##
+## Keycloak is deliberately NOT included here. Productionizing an identity
+## provider (its own database, `start` vs this repo's dev-only `start-dev`,
+## TLS/hostname hardening, backup/HA) is a distinct infrastructure concern
+## from apps/api/apps/worker's own configuration, and E5's four pillars
+## don't cover it -- see the epoch's own explicit scope boundary (AWS/K8s/
+## infra decisions deferred to E6). KEYCLOAK_ISSUER/KEYCLOAK_JWKS_URI in
+## .env.production.example assume an already-deployed, already-hardened
+## Keycloak realm reachable at those URLs, run and secured separately from
+## this compose file. Recorded here as an explicit gap, not a silent one.
+##
+## Secrets: every value below is `${VAR}` interpolation, sourced from a
+## gitignored .env.production (populate it from .env.production.example --
+## NEVER commit a real .env.production). See packages/shared's SecretLoader
+## contract for how a real deployment might source those values instead of
+## a flat file (EnvSecretLoader, used here and today, vs. the
+## AwsSecretsManagerLoader E6 stub).
+##
+## No `internal: true` on the network -- ADR-024 found that setting on this
+## same stack's dev/CI override broke published-port reachability for
+## Keycloak; nothing in this stack needs egress isolation badly enough to
+## revisit that.
+##
+## Usage: docker compose -f infra/docker/docker-compose.production.yml
+##   --env-file .env.production up -d
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: e0db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d e0db']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # No host port published -- apps/api and apps/worker reach this over
+    # the compose network by service name (postgres:5432). A migration run
+    # (docs/runbooks/deploy.md) needs host access; publish 5432 only for
+    # the duration of that run, or run migrate.js from a one-off container
+    # attached to this same compose network instead.
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a ${REDIS_PASSWORD} ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL}
+      REDIS_URL: ${REDIS_URL}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER}
+      KEYCLOAK_JWKS_URI: ${KEYCLOAK_JWKS_URI}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+    ports:
+      - '3000:3000'
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    # apps/api/Dockerfile already runs as `apiuser` (USER apiuser, non-root,
+    # ADR-029) -- nothing here needs to (or should) override that with a
+    # compose-level `user:` directive; this healthcheck runs as that same
+    # non-root user inside the already-running container.
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://localhost:3000/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM_DEFAULT: ${SMTP_FROM_DEFAULT}
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    # No HEALTHCHECK -- apps/worker exposes no HTTP endpoint to probe (it
+    # never has, ADR-029 decision #7); its liveness is its structured
+    # worker_shutdown_*/reminder_scan_completed/etc. log lines and BullMQ's
+    # own job-state, not HTTP. Adding an HTTP surface purely to satisfy a
+    # container healthcheck would be a new feature, not hardening.
+
+volumes:
+  postgres_data:
