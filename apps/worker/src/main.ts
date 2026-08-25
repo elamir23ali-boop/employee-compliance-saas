@@ -2,10 +2,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import IORedis from 'ioredis';
 import { Queue } from 'bullmq';
+import nodemailer from 'nodemailer';
 import { createDb } from '@ecs/database';
 import { createReminderWorker, REMINDER_QUEUE_NAME } from './workers/reminder.worker';
 import { createReminderScanner, scheduleReminderScans } from './workers/reminder-scanner.worker';
 import { createImportWorker } from './workers/import.worker';
+import { SmtpEmailDispatcher } from './notifications/email-dispatcher';
 
 function loadEnvLocal(): void {
   const envPath = path.resolve(__dirname, '..', '..', '..', '.env.local');
@@ -25,12 +27,36 @@ async function bootstrap(): Promise<void> {
   if (!redisUrl) {
     throw new Error('REDIS_URL is not set');
   }
+  const smtpHost = process.env.SMTP_HOST;
+  if (!smtpHost) {
+    throw new Error('SMTP_HOST is not set');
+  }
+  const smtpFromDefault = process.env.SMTP_FROM_DEFAULT;
+  if (!smtpFromDefault) {
+    throw new Error('SMTP_FROM_DEFAULT is not set');
+  }
 
   // E0/E1: app_user only. NEVER construct this connection with migration_user credentials.
   const { pool, db } = createDb({ connectionString, min: 2, max: 10 });
   const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
 
-  const reminderWorker = createReminderWorker(db, connection);
+  // E4 Pillar 3 (ADR-030): generic SMTP, config-only -- the same code
+  // targets MailHog (dev/CI) or a real provider's SMTP interface. Bounded
+  // timeouts so one hung handshake can't hang a BullMQ job indefinitely;
+  // the dispatcher never retries internally -- retry stays where ADR-026
+  // put it (the next day's scan re-enqueues on FAILED).
+  const smtpTransporter = nodemailer.createTransport({
+    host: smtpHost,
+    port: Number(process.env.SMTP_PORT ?? 587),
+    secure: process.env.SMTP_SECURE === 'true',
+    auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 10_000,
+  });
+  const emailDispatcher = new SmtpEmailDispatcher(smtpTransporter, smtpFromDefault);
+
+  const reminderWorker = createReminderWorker(db, connection, emailDispatcher);
   const importWorker = createImportWorker(db, connection);
 
   const sendReminderQueue = new Queue(REMINDER_QUEUE_NAME, { connection });
@@ -47,6 +73,7 @@ async function bootstrap(): Promise<void> {
     await reminderScanQueue.close();
     await connection.quit();
     await pool.end();
+    smtpTransporter.close();
     process.exit(0);
   };
 

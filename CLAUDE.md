@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E4 in progress — Production Readiness (Pillars 1-2 complete: live CI verification, containerization)
+## Current Phase: E4 in progress — Production Readiness (Pillars 1-3 complete: live CI verification, containerization, real notification delivery)
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -76,8 +76,20 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   genuine `@types/eslint-scope` version conflict masked by this
   environment's stable `node_modules` — both fixed, see ADR-029. No
   registry push, no orchestration manifests, no `HEALTHCHECK` — all still
-  explicitly deferred (deployment topology). Remaining E4 pillars (real
-  notification delivery, failure observability) not yet started.
+  explicitly deferred (deployment topology).
+- Pillar 3 (real notification delivery) complete: `LogEmailDispatcher`
+  (ADR-026's stub) is replaced at the `main.ts` wiring point by a real
+  `SmtpEmailDispatcher` (`apps/worker/src/notifications/email-dispatcher.ts`),
+  generic SMTP via `nodemailer`, config-only (`SMTP_*` env vars) so the
+  same code targets a MailHog container in dev/CI
+  (`infra/docker/docker-compose.yml`) or any real provider's SMTP
+  interface in production. `reminder.worker.ts`'s SENT/FAILED/SUPPRESSED
+  and idempotency-key logic is untouched — exactly the seam ADR-026
+  built for this. Content is deliberately minimal plain text this phase
+  (no HTML templates); `tests/integration/worker.test.ts`'s WORKER-04 now
+  asserts a message actually arrived in MailHog, not just that
+  `notification_log` reached `SENT`. See ADR-030. Remaining E4 pillar
+  (failure observability) not yet started.
 
 ## ABSOLUTE PROHIBITIONS
 

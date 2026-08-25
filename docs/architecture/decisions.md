@@ -989,3 +989,90 @@ discoverable any other way in this environment -- the same pattern
 ADR-028 already established: a from-scratch build is itself a test, and
 this repo has now hit that class of gap twice. No change to
 `documents`/`employees` RLS, auth, tenant isolation, or a migration.
+
+## ADR-030: E4 Pillar 3 -- real notification delivery (generic SMTP, MailHog for dev/CI)
+
+Date: E4
+Status: ACCEPTED
+
+Context: ADR-026 (E3 Phase 3) deliberately stubbed email sending --
+`LogEmailDispatcher` writes one PII-free log line and never throws,
+because no SMTP/SES provider or credentials existed anywhere in this
+repo. It defined the `EmailDispatcher` interface specifically so a real
+transport could be substituted later without touching
+`reminder.worker.ts`'s transaction/notification-log/idempotency logic.
+This pillar makes that substitution. Confirmed with the user before
+implementation: generic SMTP over a cloud-provider SDK, and minimal
+plain-text email content over an HTML template engine.
+
+Decision:
+1. **Generic SMTP via `nodemailer`**, not a cloud-provider SDK (e.g.
+   `@aws-sdk/client-ses`) or a vendor's own SDK (SendGrid/Postmark).
+   Configured entirely through env vars (`SMTP_HOST`, `SMTP_PORT`,
+   `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM_DEFAULT`) --
+   the same code sends against any real provider's SMTP interface (SES,
+   SendGrid, Postmark, corporate SMTP) with no code change, and it keeps
+   this repo's existing pattern of zero cloud-SDK coupling (Postgres/
+   Redis/Keycloak are all self-hosted; nothing else here talks to AWS or
+   any other cloud API). `apps/worker/src/main.ts` reads these once at
+   bootstrap -- this is transport config, not tenant context, so unlike
+   `tenant_id` it is fine to hold as ordinary bootstrap-scoped state, not
+   `SET LOCAL`-scoped.
+2. **MailHog is the dev/CI test double**, added as a `mailhog` service to
+   `infra/docker/docker-compose.yml` (SMTP on 1025, HTTP API on 8025,
+   `HEALTHCHECK` via the image's built-in `wget`). It needed no auth, so
+   `SMTP_USER`/`SMTP_PASS` are blank in `.env.example`/`.env.local`/CI.
+   Living in the *base* compose file (not the `.test.yml` override) means
+   `.github/workflows/ci.yml`'s existing `docker compose up` call picks it
+   up with no workflow restructuring -- only new `SMTP_*` env vars needed
+   adding to the `integration` job. `ci.yml`'s health-wait loop treats any
+   container lacking a `HEALTHCHECK` as perpetually unhealthy, so skipping
+   one (as would be tempting for a "just a test double" service) would
+   have hung that job forever.
+3. **The `EmailDispatcher` interface itself, and `reminder.worker.ts`'s
+   SENT/FAILED/SUPPRESSED/idempotency-key logic, are unchanged.** The new
+   `SmtpEmailDispatcher` (`apps/worker/src/notifications/email-dispatcher.ts`)
+   implements the same interface `LogEmailDispatcher` already did (kept,
+   unused by `main.ts` now but still available); `main.ts` just constructs
+   a nodemailer transporter and passes `SmtpEmailDispatcher` as
+   `createReminderWorker`'s third argument instead of relying on the
+   default parameter. This is exactly the seam ADR-026 decision #3 was
+   built for.
+4. **Bounded transport timeouts (10s connect/greeting/socket), no
+   dispatcher-internal retry.** `SmtpEmailDispatcher.send()` throws on any
+   failure and never retries itself; retry stays exactly where ADR-026 put
+   it -- a `FAILED` `notification_log` row with no `idempotency_keys` row
+   claimed, so the next daily scan naturally re-enqueues. A hung SMTP
+   handshake can therefore only ever cost one job up to ~10s, not block a
+   worker indefinitely.
+5. **Minimal plain-text content**: subject + body built from `docType`,
+   `daysBeforeExpiry`, and `documentId` (the full UUID, not truncated --
+   this is the email itself, sent to the document's own subject, not a
+   log line; CLAUDE.md's "NEVER log PII" governs `console.*` calls, which
+   are unchanged and still only ever carry an 8-char prefix). No HTML, no
+   template-file lookup. `emailTemplateId` from tenant policy is passed
+   through and accepted (matches the existing interface/policy shape) but
+   not yet used to select a template -- an explicit gap, the same
+   treatment ADR-026 gave real delivery itself. `emailFrom` from tenant
+   policy becomes nodemailer's `from`, falling back to `SMTP_FROM_DEFAULT`
+   when a tenant hasn't set one.
+6. **`reminder.worker.ts`'s existing document lookup gains one more
+   selected column, `documents.docType`**, needed to build real email
+   content; `ReminderEmailInput` gained a matching `docType: string`
+   field. No other query or transaction-shape change.
+
+Consequences: A real message is now actually sent (to MailHog in dev/CI,
+to a configured real provider in production) every time the reminder
+worker records a `SENT` row -- previously `SENT` only ever meant "the log
+line was written." `tests/integration/worker.test.ts`'s WORKER-04 now also
+asserts a matching message arrived via MailHog's HTTP API
+(`GET /api/v2/messages`), not just that `notification_log` reached
+`SENT`, closing the same "verify the real thing happened, not just its
+DB side-effect" gap ADR-024/ADR-028 already established for CI itself.
+Remaining gaps, explicitly deferred: no HTML/branded templates, no
+per-tenant sending domain/DKIM, no dispatcher-level retry/backoff tuning
+for real transient network errors beyond the existing next-day-scan
+self-heal, and failure observability (E4's other remaining pillar) is
+still unstarted -- a string of `FAILED` rows in `notification_log` has no
+alerting on top of it yet. No change to `documents`/`employees` RLS,
+auth, tenant isolation, or a migration.
