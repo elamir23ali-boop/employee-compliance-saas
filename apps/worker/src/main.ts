@@ -73,7 +73,16 @@ async function bootstrap(): Promise<void> {
 
   console.log('Worker process started (reminders, imports, failure-alert scans)');
 
-  const shutdown = async (): Promise<void> => {
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(JSON.stringify({ action: 'worker_shutdown_started', signal }));
+
+    // Worker.close() (no `force` arg -> force=false) stops picking up new
+    // jobs and awaits whenCurrentJobsFinished() before resolving -- a job
+    // already in progress is never abandoned mid-execution. Confirmed
+    // against bullmq's own Worker.close() source, not assumed.
     await reminderWorker.close();
     await importWorker.close();
     await reminderScanner.close();
@@ -84,11 +93,13 @@ async function bootstrap(): Promise<void> {
     await connection.quit();
     await pool.end();
     smtpTransporter.close();
+
+    console.log(JSON.stringify({ action: 'worker_shutdown_completed', signal }));
     process.exit(0);
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
 }
 
 bootstrap();

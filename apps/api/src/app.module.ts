@@ -8,6 +8,7 @@ import { NotificationLogModule } from './notifications/notification-log.module';
 import { ImportExportModule } from './import-export/import-export.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { PerfModule } from './perf/perf.module';
+import { HealthModule } from './health/health.module';
 import { RequestIdMiddleware } from './common/request-id.middleware';
 
 @Module({
@@ -21,6 +22,7 @@ import { RequestIdMiddleware } from './common/request-id.middleware';
     ImportExportModule,
     DashboardModule,
     PerfModule,
+    HealthModule,
   ],
 })
 export class AppModule implements NestModule {
