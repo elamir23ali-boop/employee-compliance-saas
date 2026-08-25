@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E4 in progress — Production Readiness (Pillars 1-3 complete: live CI verification, containerization, real notification delivery)
+## Current Phase: E4 complete — Production Readiness (Pillars 1-4: live CI verification, containerization, real notification delivery, failure observability)
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -88,8 +88,22 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   built for this. Content is deliberately minimal plain text this phase
   (no HTML templates); `tests/integration/worker.test.ts`'s WORKER-04 now
   asserts a message actually arrived in MailHog, not just that
-  `notification_log` reached `SENT`. See ADR-030. Remaining E4 pillar
-  (failure observability) not yet started.
+  `notification_log` reached `SENT`. See ADR-030.
+- **Pillar 4 (failure observability) complete, closing out E4.** `GET
+  /api/v1/notification-log/stats` (tenant-admin only, `?windowHours=`,
+  default 24, 1-720 range) surfaces per-tenant `SENT`/`FAILED`/`SUPPRESSED`
+  counts and a failure rate from `notification_log`, strictly scoped to
+  the caller's own tenant (no cross-tenant/ops view — none exists
+  anywhere in this repo). A new hourly BullMQ scan
+  (`apps/worker/src/workers/failure-alert-scanner.worker.ts`) aggregates
+  each active tenant's trailing 6h of attempts and emits a structured,
+  PII-free `console.error` ALERT line (`notification_failure_rate_alert`)
+  when the failure rate crosses a hardcoded threshold
+  (`shouldAlertOnFailureRate`, `apps/worker/src/workers/failure-alert-policy.ts`)
+  over a minimum sample size — no external alert channel, no
+  tenant-configurable threshold yet, no dedup across scans. New index:
+  `idx_notification_log_status_sent_at`. See ADR-031 for the cadence,
+  denominator, and test-strategy decisions.
 
 ## ABSOLUTE PROHIBITIONS
 

@@ -7,12 +7,15 @@ import request from 'supertest';
 import { afterAll, describe, expect, it } from 'vitest';
 import { getAccessToken } from '../support/keycloak-client';
 import { cleanupE2TestEmployees } from '../support/db-cleanup';
+import { seedNotificationLogRows } from '../support/seed-notification-log';
 
 const TENANT_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const REMINDER_QUEUE_NAME = 'reminders'; // must match apps/worker/src/workers/reminder.worker.ts
 const SEND_REMINDER_JOB = 'send-reminder';
 const REMINDER_SCAN_QUEUE_NAME = 'reminder-scans'; // must match apps/worker/src/workers/reminder-scanner.worker.ts
 const SCAN_JOB_NAME = 'scan-expiring-documents';
+const FAILURE_ALERT_SCAN_QUEUE_NAME = 'failure-alert-scans'; // must match apps/worker/src/workers/failure-alert-scanner.worker.ts
+const FAILURE_ALERT_SCAN_JOB_NAME = 'scan-notification-failure-rates';
 const API_BASE = process.env.E2_API_BASE ?? 'http://localhost:3000';
 const MAILHOG_API_BASE = process.env.MAILHOG_API_BASE ?? 'http://localhost:8025';
 
@@ -95,10 +98,12 @@ describe('Worker tests', () => {
   const conn = connection();
   const reminderQueue = new Queue(REMINDER_QUEUE_NAME, { connection: conn });
   const reminderScanQueue = new Queue(REMINDER_SCAN_QUEUE_NAME, { connection: conn });
+  const failureAlertScanQueue = new Queue(FAILURE_ALERT_SCAN_QUEUE_NAME, { connection: conn });
 
   afterAll(async () => {
     await reminderQueue.close();
     await reminderScanQueue.close();
+    await failureAlertScanQueue.close();
     await conn.quit();
     await cleanupE2TestEmployees();
   });
@@ -178,5 +183,29 @@ describe('Worker tests', () => {
       15000,
     );
     expect(found).toBe(true);
+  });
+
+  it('WORKER-06: the failure-alert scan runs end-to-end against a tenant with an elevated failure rate', async () => {
+    await seedNotificationLogRows(TENANT_A, [
+      { status: 'FAILED' },
+      { status: 'FAILED' },
+      { status: 'FAILED' },
+      { status: 'FAILED' },
+      { status: 'SENT' },
+    ]);
+
+    const job = await failureAlertScanQueue.add(
+      FAILURE_ALERT_SCAN_JOB_NAME,
+      {},
+      { jobId: `job-w06-${Date.now()}` },
+    );
+
+    // Proves the scanner's real tenant-loop/transaction/aggregation code
+    // runs end-to-end without throwing -- the ALERT line itself is a
+    // console.error side effect this repo's test suite doesn't assert on
+    // anywhere (see docs/architecture/decisions.md, ADR-031); the alert
+    // decision logic is covered by tests/unit/failure-alert-policy.test.ts.
+    const completed = await waitUntil(async () => (await job.getState()) === 'completed', 15000);
+    expect(completed).toBe(true);
   });
 });

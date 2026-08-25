@@ -7,6 +7,7 @@ import { createDb } from '@ecs/database';
 import { createReminderWorker, REMINDER_QUEUE_NAME } from './workers/reminder.worker';
 import { createReminderScanner, scheduleReminderScans } from './workers/reminder-scanner.worker';
 import { createImportWorker } from './workers/import.worker';
+import { createFailureAlertScanner, scheduleFailureAlertScans } from './workers/failure-alert-scanner.worker';
 import { SmtpEmailDispatcher } from './notifications/email-dispatcher';
 
 function loadEnvLocal(): void {
@@ -63,7 +64,14 @@ async function bootstrap(): Promise<void> {
   const reminderScanner = createReminderScanner(db, sendReminderQueue, connection);
   const reminderScanQueue = await scheduleReminderScans(connection);
 
-  console.log('Worker process started (reminders, imports)');
+  // E4 Pillar 4 (ADR-031): read-only, near-zero-cost hourly scan of
+  // notification_log for elevated per-tenant failure rates. Emits a
+  // structured console.error ALERT line -- no external channel, no queue
+  // fan-out.
+  const failureAlertScanner = createFailureAlertScanner(db, connection);
+  const failureAlertScanQueue = await scheduleFailureAlertScans(connection);
+
+  console.log('Worker process started (reminders, imports, failure-alert scans)');
 
   const shutdown = async (): Promise<void> => {
     await reminderWorker.close();
@@ -71,6 +79,8 @@ async function bootstrap(): Promise<void> {
     await reminderScanner.close();
     await sendReminderQueue.close();
     await reminderScanQueue.close();
+    await failureAlertScanner.close();
+    await failureAlertScanQueue.close();
     await connection.quit();
     await pool.end();
     smtpTransporter.close();

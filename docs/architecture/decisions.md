@@ -1076,3 +1076,100 @@ self-heal, and failure observability (E4's other remaining pillar) is
 still unstarted -- a string of `FAILED` rows in `notification_log` has no
 alerting on top of it yet. No change to `documents`/`employees` RLS,
 auth, tenant isolation, or a migration.
+
+## ADR-031: E4 Pillar 4 -- failure observability (internal endpoint + threshold-alert log line)
+
+Date: E4
+Status: ACCEPTED
+
+Context: Closes the exact gap ADR-030's own "Consequences" section flagged:
+"a string of `FAILED` rows in `notification_log` has no alerting on top of
+it yet." Confirmed with the user before implementation: an internal,
+read-only API endpoint surfacing FAILED-row counts/rate from
+`notification_log`, plus a worker-side periodic scan emitting a
+structured, PII-free ALERT-level log line when a tenant's failure rate
+crosses a threshold -- no new external dependency (no Slack/PagerDuty/
+email-to-ops) and no new cross-tenant "ops" read pattern, since none
+exists anywhere in this repo today.
+
+Decision:
+1. **The read endpoint is strictly single-tenant-scoped**
+   (`GET /api/v1/notification-log/stats`, `req.tenantId` only, never
+   client input), `tenant-admin`-only -- the same RBAC bar as the existing
+   `GET /api/v1/notification-policy`, which is already this repo's
+   precedent for "who manages notification-related config/health."
+   Inventing a cross-tenant/platform-admin view was considered and
+   rejected: every existing endpoint in this repo is RLS-scoped to the
+   caller's own tenant, and there is no established pattern for exposing
+   an aggregate across tenants over HTTP.
+2. **One migration, index-only**: `idx_notification_log_status_sent_at
+   ON notification_log(tenant_id, status, sent_at)`
+   (`010_e4_failure_observability_index.sql`, mirrored to
+   `infra/postgres/init/10_...sql` per ADR-012). The only existing index,
+   `idx_notification_log_dedup(tenant_id, document_id, days_before_expiry,
+   sent_at)` (ADR-025), cannot serve a `(tenant_id, status, sent_at)`
+   filter/group -- both the new endpoint and the new scanner need it.
+3. **Alert threshold and minimum sample size are hardcoded constants**
+   this phase (`FAILURE_RATE_ALERT_THRESHOLD = 0.5`,
+   `MIN_ATTEMPTS_FOR_ALERT = 5`, `apps/worker/src/workers/failure-alert-policy.ts`)
+   -- no new `tenant_notification_policies` column. Explicit, documented
+   gap, the same treatment ADR-026/030 gave other not-yet-configurable
+   values (email stub, SMTP timeouts). The minimum-sample-size floor
+   exists specifically so a tenant with one attempt that fails isn't a
+   meaningless 100%-alert.
+4. **The failure-rate denominator excludes `SUPPRESSED`**
+   (`totalAttempts = sentCount + failedCount`). `SUPPRESSED` (no email on
+   file / document gone, ADR-026 decision #2) is a business decision, not
+   a dispatch failure -- counting it would dilute a real SMTP-outage
+   signal.
+5. **The scanner (`apps/worker/src/workers/failure-alert-scanner.worker.ts`)
+   runs hourly** (`'0 * * * *'`, `failure-alert-scans` queue), not daily
+   like the reminder scan, over a trailing 6h window. The reminder scan is
+   daily because matching an expiry threshold is a daily-granularity
+   business rule; this scan is read-only and near-zero-cost (one
+   `GROUP BY` per active tenant, no writes, no queue fan-out), so there is
+   no reason to throttle it to daily -- doing so would leave exactly the
+   gap ADR-030 already flagged ("no dispatcher-level retry beyond the
+   next-day-scan self-heal") invisible for up to 24h during a real SMTP
+   outage. The 6h window is deliberately wider than the 1h scan interval
+   so overlapping windows catch a burst from recent cycles and give
+   low-volume tenants enough samples to clear the minimum-attempts floor.
+   Structurally mirrors `reminder-scanner.worker.ts`'s per-tenant
+   transaction loop (`SET LOCAL app.current_tenant_id`, re-checking the
+   tenant is still active inside the transaction) with one deliberate
+   divergence: it does **not** skip tenants whose
+   `tenant_notification_policies.enabled` is false -- observability should
+   reflect ground truth in `notification_log` regardless of current
+   policy state.
+6. **No dedup/silencing layer.** An ongoing failure condition re-emits the
+   `console.error` ALERT line (`action:
+   'notification_failure_rate_alert'`, `tenantId.substring(0,8)` only, no
+   other PII) on every hourly cycle until the window clears. Acceptable
+   for a log-line-only alert with no external paging this phase.
+7. **No test asserts the `console.error` ALERT line itself.** This repo's
+   test suite does not assert on `console.*` output anywhere. The alert
+   *decision* logic is fully covered by pure unit tests
+   (`tests/unit/failure-alert-policy.test.ts`) against
+   `shouldAlertOnFailureRate` -- exactly why ADR-026/027/028 established
+   the pure-extraction pattern in the first place. The integration test
+   (`WORKER-06`, `tests/integration/worker.test.ts`) instead proves the
+   scanner's real tenant-loop/transaction/aggregation code runs
+   end-to-end against seeded `notification_log` rows without throwing.
+   `notification_log` rows are seeded directly
+   (`tests/support/seed-notification-log.ts`, app_user connection +
+   `set_config` per transaction) since the table has no HTTP write path
+   (`INSERT`-only grant) -- the same pattern
+   `tests/security/notification-policy-rbac.test.ts`'s `NOTIF-RLS-01`
+   already established. Forcing genuine SMTP failures through the live
+   pipeline was rejected: ~10s per attempt (ADR-030's bounded timeout),
+   and the worker's transporter is shared across the whole CI run, which
+   would make `WORKER-04` (MailHog-dependent) unreliable.
+
+Consequences: E4 is now fully closed (all 4 pillars: live CI verification,
+containerization/image scanning, real SMTP delivery, failure
+observability). Remaining explicit gaps carried forward: alert
+threshold/sample-size are not tenant-configurable, no external
+paging/notification channel exists, and repeated ALERT lines have no
+dedup/silencing while a failure condition persists -- a real external
+alerting system consuming these log lines would own that itself. No
+change to `documents`/`employees` RLS, auth, or tenant isolation logic.
