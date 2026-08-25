@@ -14,6 +14,7 @@ const SEND_REMINDER_JOB = 'send-reminder';
 const REMINDER_SCAN_QUEUE_NAME = 'reminder-scans'; // must match apps/worker/src/workers/reminder-scanner.worker.ts
 const SCAN_JOB_NAME = 'scan-expiring-documents';
 const API_BASE = process.env.E2_API_BASE ?? 'http://localhost:3000';
+const MAILHOG_API_BASE = process.env.MAILHOG_API_BASE ?? 'http://localhost:8025';
 
 function connection(): IORedis {
   const url = process.env.REDIS_URL;
@@ -46,6 +47,13 @@ async function notificationLogStatus(documentId: string, daysBeforeExpiry: numbe
   }
 }
 
+async function mailhogReceivedFor(toEmail: string): Promise<boolean> {
+  const res = await fetch(`${MAILHOG_API_BASE}/api/v2/search?kind=to&query=${encodeURIComponent(toEmail)}`);
+  if (!res.ok) return false;
+  const body = (await res.json()) as { total: number };
+  return body.total > 0;
+}
+
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs = 30000, intervalMs = 250): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -55,7 +63,8 @@ async function waitUntil(predicate: () => Promise<boolean>, timeoutMs = 30000, i
   return false;
 }
 
-async function createEmployeeWithEmail(token: string): Promise<string> {
+async function createEmployeeWithEmail(token: string): Promise<{ employeeId: string; email: string }> {
+  const email = `reminder-fixture-${randomUUID().slice(0, 8)}@example.test`;
   const res = await request(API_BASE)
     .post('/api/v1/employees')
     .set('Authorization', `Bearer ${token}`)
@@ -63,10 +72,10 @@ async function createEmployeeWithEmail(token: string): Promise<string> {
       employeeCode: `EMP-REM-${randomUUID().slice(0, 8)}`,
       firstName: 'Reminder',
       lastName: 'Fixture',
-      email: `reminder-fixture-${randomUUID().slice(0, 8)}@example.test`,
+      email,
     });
   expect(res.status).toBe(201);
-  return res.body.data.id as string;
+  return { employeeId: res.body.data.id as string, email };
 }
 
 async function createExpiringDocument(token: string, employeeId: string, daysUntilExpiry: number): Promise<string> {
@@ -135,9 +144,9 @@ describe('Worker tests', () => {
     expect(await idempotencyKeyCount('idem-w03')).toBe(1);
   });
 
-  it('WORKER-04: a job for a real document + employee with an email is dispatched and logged SENT', async () => {
+  it('WORKER-04: a job for a real document + employee with an email is dispatched, logged SENT, and actually delivered', async () => {
     const token = await getAccessToken('hr_staff_tenant_a@e0.local', 'TestPass123!');
-    const employeeId = await createEmployeeWithEmail(token);
+    const { employeeId, email } = await createEmployeeWithEmail(token);
     const documentId = await createExpiringDocument(token, employeeId, 30);
 
     await reminderQueue.add(SEND_REMINDER_JOB, {
@@ -150,11 +159,16 @@ describe('Worker tests', () => {
 
     const found = await waitUntil(async () => (await notificationLogStatus(documentId, 30)) === 'SENT');
     expect(found).toBe(true);
+
+    // Proves the real SMTP send path (ADR-030), not just the notification_log
+    // side-effect -- a SENT row alone would also be produced by a stub.
+    const delivered = await waitUntil(() => mailhogReceivedFor(email));
+    expect(delivered).toBe(true);
   });
 
   it('WORKER-05: the daily scan finds a newly-expiring document and dispatches it end-to-end', async () => {
     const token = await getAccessToken('hr_staff_tenant_a@e0.local', 'TestPass123!');
-    const employeeId = await createEmployeeWithEmail(token);
+    const { employeeId } = await createEmployeeWithEmail(token);
     const documentId = await createExpiringDocument(token, employeeId, 30);
 
     await reminderScanQueue.add(SCAN_JOB_NAME, {}, { jobId: `job-w05-${documentId}` });

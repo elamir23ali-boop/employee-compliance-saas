@@ -68,6 +68,10 @@ jobs:
       DATABASE_MIGRATION_URL: postgresql://migration_user:migration_dev_pass_local@localhost:5432/e0db
       DATABASE_ADMIN_URL: postgresql://postgres:postgres_superuser_local_only@localhost:5432/e0db
       REDIS_URL: redis://:dev-redis-pass@localhost:6379/1
+      SMTP_HOST: localhost
+      SMTP_PORT: 1025
+      SMTP_SECURE: 'false'
+      SMTP_FROM_DEFAULT: no-reply@example.test
       KEYCLOAK_ISSUER: http://localhost:8080/realms/e0-test
       KEYCLOAK_JWKS_URI: http://localhost:8080/realms/e0-test/protocol/openid-connect/certs
       KEYCLOAK_CLIENT_ID: e0-api

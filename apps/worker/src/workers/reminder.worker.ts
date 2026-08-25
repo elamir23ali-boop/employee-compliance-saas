@@ -85,7 +85,7 @@ export function createReminderWorker(
         }
 
         const docRows = await tx
-          .select({ documentId: documents.id, employeeEmail: employees.email })
+          .select({ documentId: documents.id, docType: documents.docType, employeeEmail: employees.email })
           .from(documents)
           .leftJoin(employees, eq(documents.employeeId, employees.id))
           .where(and(eq(documents.id, documentId), eq(documents.tenantId, tenantId), isNull(documents.deletedAt)))
@@ -138,6 +138,7 @@ export function createReminderWorker(
           await dispatcher.send({
             to: doc.employeeEmail,
             documentId,
+            docType: doc.docType,
             daysBeforeExpiry,
             emailFrom: policy.emailFrom,
             emailTemplateId: policy.emailTemplateId,
