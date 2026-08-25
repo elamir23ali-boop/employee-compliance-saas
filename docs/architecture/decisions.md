@@ -1173,3 +1173,101 @@ paging/notification channel exists, and repeated ALERT lines have no
 dedup/silencing while a failure condition persists -- a real external
 alerting system consuming these log lines would own that itself. No
 change to `documents`/`employees` RLS, auth, or tenant isolation logic.
+
+## ADR-032: PgBouncer mode selection for RLS compatibility
+
+Date: E5
+Status: ACCEPTED
+
+Context: E5 Pillar 2 asks whether this repo's tenant-isolation pattern --
+`SET LOCAL app.current_tenant_id` inside every RLS-protected transaction,
+reverting at COMMIT/ROLLBACK by Postgres's own guarantee (ADR-003) -- stays
+correct if a connection pooler is introduced between apps/api/apps/worker
+and Postgres. The specific risk `SET LOCAL`-based tenant context exists to
+avoid is a *session*-scoped GUC (a plain `SET`, not `SET LOCAL`) leaking to
+a different tenant's query on a reused connection; PgBouncer's transaction
+pooling mode reassigns the underlying server connection between
+*transactions*, not just between sessions, which is exactly the boundary
+that could reintroduce that risk if this repo's code ever relied on
+session-level continuity. Rather than assume either "SET LOCAL is always
+pooler-safe" or "transaction pooling is always dangerous with RLS" --
+both claims show up unqualified in different corners of the internet --
+this was tested directly against this environment's real `docker-postgres-1`
+and `app_user`, not assumed.
+
+What was tested: `edoburu/pgbouncer:latest` (`pool_mode = transaction`,
+`default_pool_size = 5`, `auth_type = scram-sha-256`) run against this
+environment's live Postgres container, on the same `docker_default` compose
+network, using a throwaway Node script (`pg.Client`, one real TCP connection
+per "logical client" -- run and deleted after use, not committed) issuing
+raw SQL through the pooler:
+1. **Single client, single transaction**: `BEGIN; SELECT
+   set_config('app.current_tenant_id', 'tenant-A-value', true); SELECT
+   current_setting(...)` (inside the transaction) `; COMMIT; SELECT
+   current_setting(...)` (after commit, same client).
+2. **A second, independent client**, immediately after, opening its own
+   fresh transaction with no `SET LOCAL` issued, reading
+   `current_setting('app.current_tenant_id', true)`.
+3. **30 rapid sequential transactions**, each its own new `pg.Client`
+   connection (through the pooler, `default_pool_size = 5` so backend
+   connections were necessarily being reused/multiplexed across these),
+   each setting a distinct tenant value and, critically, reading
+   `current_setting(...)` *before* setting anything -- the read that would
+   reveal a leak from whatever transaction previously held that same
+   backend connection.
+4. **20 concurrent transactions** (`Promise.all`, real concurrency, not
+   sequential), each setting a distinct value, sleeping 20ms mid-transaction
+   to widen any race window, then reading back its own value before commit.
+
+What was observed: every case behaved exactly as `SET LOCAL`'s documented
+Postgres semantics predict, with zero exceptions across all 4 tests --
+`tenant-A-value` was visible only inside test 1's own transaction and had
+reverted to empty-string immediately after that same client's `COMMIT`; the
+second client's fresh transaction saw no value at all (empty string, not
+`'tenant-A-value'`); all 30 sequential transactions read an empty string
+before setting their own value (zero contamination from a prior
+transaction's leftover setting on a reused backend connection); all 20
+concurrent transactions read back exactly their own value with no
+cross-transaction mixing.
+
+Decision: **PgBouncer's transaction pooling mode (`pool_mode = transaction`)
+is compatible with this repo's tenant-isolation pattern, unconditionally.**
+No code change to `SET LOCAL` usage anywhere in `apps/api`/`apps/worker` is
+required. This is not a coincidence needing a workaround -- it follows
+directly from *why* it was empirically clean: PgBouncer's transaction mode
+still gives one transaction (one `BEGIN`...`COMMIT`) exclusive use of one
+real backend connection for that transaction's full duration; it only
+declines to guarantee the *same* backend connection across two *separate*
+transactions from the same client session. `SET LOCAL`'s revert-at-COMMIT
+behavior is enforced by Postgres itself, on the backend connection, not by
+anything session- or pooler-aware -- so a boundary that transaction pooling
+doesn't preserve (session continuity across transactions) is exactly the
+boundary this repo's pattern never relies on in the first place (CLAUDE.md:
+"SET LOCAL per transaction only... every transaction that touches
+RLS-protected tables sets tenant context as its first statement";
+ADR-003/ADR-020/ADR-026 all reinforce the same single-transaction scoping).
+The failure mode transaction pooling actually creates -- a plain *session*
+`SET`, a prepared statement assumed to persist, an advisory lock not taken
+`_xact`-scoped, `LISTEN`/`NOTIFY`, a cursor without `WITH HOLD` -- does not
+exist anywhere in this codebase; a repo-wide grep confirms `SET LOCAL` (via
+`set_config(..., true)`) is the only session-GUC write pattern used.
+
+No PgBouncer service is added to
+`infra/docker/docker-compose.production.yml` in E5 -- introducing one is a
+sizing/topology/monitoring decision (how many backend connections, admin
+console exposure, its own healthcheck and resource limits) distinct from
+the compatibility question this ADR answers, and no pooler exists anywhere
+in this repo's dev/CI stack today to extend. `.env.production.example`'s
+database section is updated with this finding as forward-looking guidance
+for whoever introduces one (E6, or a managed equivalent like RDS Proxy,
+which uses the same transaction-multiplexing model and the same reasoning
+applies) -- not a new required variable this phase.
+
+Consequences: Removes what could otherwise have been a real blocker to
+introducing connection pooling in front of Postgres later (E6 or beyond)
+-- confirmed now, empirically, rather than discovered the hard way in
+production the way ADR-028's FK-violation bug was. No change to any RLS
+policy, `SET LOCAL` call site, or migration. If a future phase ever adds a
+session-level Postgres feature (`LISTEN`/`NOTIFY`, a non-`_xact` advisory
+lock, a `WITH HOLD` cursor, a plain session `SET`), revisit this ADR before
+assuming transaction-mode pooling still applies unmodified.

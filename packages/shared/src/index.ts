@@ -6,3 +6,4 @@ export * from './types/import.types';
 export * from './types/dashboard.types';
 export * from './types/audit.types';
 export * from './constants/roles.constants';
+export * from './secrets/secret-loader';
