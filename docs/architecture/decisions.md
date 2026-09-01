@@ -1401,3 +1401,58 @@ tenant-isolation logic changed -- only a test's query filter. `tools/seed/`
 is validation tooling only: it is typechecked and linted (added to the root
 `tsconfig.json` `include` and the root `lint` script) but is never imported
 by `apps/**` or `packages/**` and never runs in CI or at runtime.
+
+## ADR-035: runtime Keycloak users for the E6 seed tenants
+
+Date: E6 (Phase 2 -- baseline 10K)
+Status: ACCEPTED
+
+Context: E6 Phases 2-6 measure real HTTP latency and run k6 load against
+endpoints that require a JWT (`/api/v1/employees`, `/api/v1/dashboard/*`,
+`/api/v1/exports|imports/*`). The tenant is resolved from the token's
+`org_slug` claim -> `tenants.slug` lookup (`tenant.middleware.ts` ->
+`tenant.resolver.ts`). `infra/docker/keycloak/realm-export.json` ships users
+only for the 3 E0 tenants (`org-tenant-a/b/c`); the 5 E6 seed tenants
+(`slug LIKE 'seed-%'`, ADR-034) have none, so no token can be minted for the
+tenants that actually hold the load-test data. Seeding into the E0 tenants
+instead was rejected: it breaks the `tenant A == 5` assertions in RLS-01 /
+POOL-01 / `keycloak.test.ts` with seed data present, a wider blast radius
+than ADR-034. User approved provisioning runtime Keycloak users for the seed
+tenants.
+
+Decision: `tools/seed/keycloak-users.ts` (`npm run seed:users` /
+`npm run seed:users -- --delete`) provisions one `hr-manager` user per seed
+tenant (`seed-e6-<slug>@e6.local` / `SeedPass123!`,
+attribute `org_slug=<seed slug>`) via the Keycloak **admin API** -- the same
+mechanism `tests/support/keycloak-admin.ts` already uses (its
+`setAccessTokenLifespan()` does a runtime `PUT /admin/realms/e0-test`).
+`hr-manager` (role hierarchy level 4) is the one role that covers every
+endpoint E6 exercises (dashboard/employee reads = viewer+, imports =
+hr-staff+, exports = hr-manager+).
+
+One realm-level change was unavoidable and is done by the same script:
+**Keycloak 26's declarative user profile silently drops any attribute not
+declared in the profile.** `realm-export.json` configures no user profile, so
+the *imported* E0 users keep their `org_slug` (import bypasses the filter) but
+an admin-API-created user loses it -> every request 403s "Missing org_slug
+claim" (confirmed empirically). The script therefore also declares `org_slug`
+as an **optional** attribute in the realm user profile
+(`PUT /admin/realms/e0-test/users/profile`) -- the narrowest possible fix
+(declaring one attribute, not flipping `unmanagedAttributePolicy` to `ENABLED`
+which would permit arbitrary attributes). `--delete` removes both the users
+and the profile attribute, restoring the original realm state. Verified
+non-breaking for E0: all three suites are 178/178 with the profile attribute
+declared and the seed users present.
+
+What is NOT changed: `realm-export.json` on disk, the `e0-api` client, the
+`org_slug` protocol mapper, token lifespans, or any E0 user. The provisioning
+is runtime-only and fully reversible; the seed users are left in place across
+generate/cleanup cycles (cheap, reusable) and `npm run cleanup` deliberately
+does not touch Keycloak.
+
+Consequences: E6 measurements and k6 scripts can authenticate per seed tenant,
+isolated from the E0 fixtures, and Phase 4.5's cross-tenant isolation checks
+can use two seed tenants without touching E0. If this environment's Keycloak
+volume is ever reset, `npm run seed:users` must be re-run (it is idempotent).
+The `e6-results/` docs record the exact commands. No application code,
+migration, RLS policy, or CI change.

@@ -20,6 +20,7 @@
     "test:integration": "vitest run tests/integration",
     "generate": "tsx tools/seed/generate.ts",
     "cleanup": "tsx tools/seed/cleanup.ts",
+    "seed:users": "tsx tools/seed/keycloak-users.ts",
     "db:migrate": "node infra/postgres/migrate.js",
     "docker:up": "docker compose -f infra/docker/docker-compose.yml up -d",
     "docker:down": "docker compose -f infra/docker/docker-compose.yml down"

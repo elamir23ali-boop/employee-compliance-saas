@@ -64,6 +64,36 @@ export const EXPIRY_DISTRIBUTION = {
 
 export type ExpiryBucket = keyof typeof EXPIRY_DISTRIBUTION;
 
+/**
+ * Runtime Keycloak users for the seed tenants (ADR-035). The seed tenants
+ * have no users in realm-export.json, so no JWT can be minted for them --
+ * this provisions one `hr-manager` user per seed tenant via the Keycloak
+ * admin API (the same mechanism tests/support/keycloak-admin.ts already
+ * uses). NOT a realm-configuration change: realm/client/mappers are
+ * untouched, only user rows are added. Provision with `npm run seed:users`,
+ * remove with `npm run seed:users -- --delete`.
+ *
+ * `hr-manager` (role hierarchy level 4) is the single role that covers every
+ * endpoint the E6 load/stress phases exercise: dashboard + employee reads
+ * (viewer+), imports (hr-staff+), exports (hr-manager+).
+ */
+export const SEED_KC_PASSWORD = 'SeedPass123!';
+export const SEED_KC_ROLE = 'hr-manager';
+
+export interface SeedKcUser {
+  username: string;
+  tenantSlug: string;
+  firstName: string;
+  lastName: string;
+}
+
+export const SEED_KC_USERS: SeedKcUser[] = TENANTS.map((t, i) => ({
+  username: `seed-e6-${t.slug}@e6.local`,
+  tenantSlug: t.slug,
+  firstName: 'SeedE6',
+  lastName: `T${i + 1}`,
+}));
+
 /** Rows per multi-row INSERT statement. COPY FROM is never used (RLS). */
 export const BATCH_SIZE = 500;
 
