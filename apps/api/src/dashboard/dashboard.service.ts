@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { addDays, formatISO } from 'date-fns';
+import { addDays } from 'date-fns';
 import { and, eq, gte, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import { documents, ExpiryStatus } from '@ecs/database';
 import type { DashboardSummary, DocumentStatsRow, DocumentType } from '@ecs/shared';
 import { DrizzleService } from '../database/drizzle.service';
 import { setTenantContext } from '../database/tenant-context';
+import { toUtcDateString } from '../common/calendar-days';
 
 export type DocumentRow = typeof documents.$inferSelect;
 
@@ -70,8 +71,10 @@ export class DashboardService {
     const withinDays = params.withinDays ?? 30;
     const page = params.page ?? 1;
     const limit = params.limit ?? 20;
-    const today = formatISO(new Date(), { representation: 'date' });
-    const windowEnd = formatISO(addDays(new Date(), withinDays), { representation: 'date' });
+    // UTC calendar dates, matching how expiry_date values are stored -- see
+    // ../common/calendar-days.ts and ADR-033.
+    const today = toUtcDateString(new Date());
+    const windowEnd = toUtcDateString(addDays(new Date(), withinDays));
 
     return this.drizzle.db.transaction(async (tx) => {
       await setTenantContext(tx, tenantId);

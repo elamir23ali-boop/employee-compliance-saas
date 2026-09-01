@@ -1,5 +1,4 @@
 import { Worker, Queue } from 'bullmq';
-import { differenceInCalendarDays } from 'date-fns';
 import { and, eq, isNull, isNotNull, sql } from 'drizzle-orm';
 import type IORedis from 'ioredis';
 import {
@@ -11,6 +10,7 @@ import {
   type Database,
 } from '@ecs/database';
 import { matchReminderThreshold } from './reminder-policy';
+import { calendarDaysUntil } from './calendar-days';
 import { SEND_REMINDER_JOB } from './reminder.worker';
 
 export const REMINDER_SCAN_QUEUE_NAME = 'reminder-scans';
@@ -69,10 +69,9 @@ export function createReminderScanner(db: Database, sendReminderQueue: Queue, co
               ),
             );
 
-          const today = new Date();
           for (const doc of candidates) {
             if (!doc.expiryDate) continue;
-            const daysUntilExpiry = differenceInCalendarDays(new Date(doc.expiryDate), today);
+            const daysUntilExpiry = calendarDaysUntil(doc.expiryDate);
             const threshold = matchReminderThreshold(daysUntilExpiry, reminderDaysBefore);
             if (threshold === null) continue;
 

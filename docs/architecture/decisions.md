@@ -1271,3 +1271,77 @@ policy, `SET LOCAL` call site, or migration. If a future phase ever adds a
 session-level Postgres feature (`LISTEN`/`NOTIFY`, a non-`_xact` advisory
 lock, a `WITH HOLD` cursor, a plain session `SET`), revisit this ADR before
 assuming transaction-mode pooling still applies unmodified.
+
+## ADR-033: date-only comparisons are normalised to a UTC calendar frame
+
+Date: E6 (pre-Phase-1 hardening)
+Status: ACCEPTED
+
+Context: Surfaced while running the full suite on a UTC+4 developer
+workstation before starting E6 -- `tests/integration/worker.test.ts`'s
+WORKER-05 ("the daily scan finds a newly-expiring document and dispatches it
+end-to-end") failed deterministically, 158/159, with no seed data present
+and a clean working tree. It is not a flake and not E6-introduced: it is a
+latent timezone bug in how the codebase compared date-only values, invisible
+until now because CI and this repo's other environments all run in UTC.
+
+Root cause: `documents.expiry_date` is a Postgres `DATE` and the
+create/update DTOs carry a `YYYY-MM-DD` string (`z.string().date()`) -- both
+are calendar dates with no time and no timezone. Three call sites turned
+those into a day count with `differenceInCalendarDays(new Date(expiryString),
+new Date())` (or the `formatISO(new Date(), { representation: 'date' })`
+equivalent):
+
+- `apps/api/src/expiry/expiry.service.ts` -- the Expiry Engine's
+  `daysUntilExpiry`
+- `apps/worker/src/workers/reminder-scanner.worker.ts` -- the daily scan's
+  per-document threshold check
+- `apps/api/src/dashboard/dashboard.service.ts` -- the `/dashboard/expiring`
+  window bounds
+
+`new Date('2026-10-01')` parses as **UTC** midnight, but
+`differenceInCalendarDays` then reduces both operands to **local** midnight;
+`formatISO(..., { representation: 'date' })` likewise emits the local date.
+On any host not in UTC the two frames disagree by a day. Concretely, on this
+box (local `2026-09-02 00:17 +04:00`, i.e. UTC `2026-09-01 20:17`): a
+document created "30 days out" via the test helper
+(`addDays(new Date(), 30).toISOString().slice(0,10)` -> `'2026-10-01'`, a UTC
+date string) was measured by the scanner as **29** days out, so
+`matchReminderThreshold(29, [90,60,30,14,7,1])` -- an exact-day match by
+design (ADR-026) -- returned `null` and no reminder was ever enqueued. The
+Expiry Engine's `<=` widest-window check tolerates the same off-by-one
+without flipping status in almost all cases, which is why only the scanner's
+exact match broke visibly; the underlying defect was identical in all three
+places.
+
+Decision: Added `calendarDaysUntil(expiryDate, now?)` and
+`toUtcDateString(instant)` in `apps/api/src/common/calendar-days.ts`,
+mirrored verbatim in `apps/worker/src/workers/calendar-days.ts` (standalone
+process, no cross-app import -- same rule as `DEFAULT_REMINDER_DAYS_BEFORE`,
+ADR-016/ADR-017). Both do calendar arithmetic entirely in the UTC frame:
+`Date.UTC(y, m-1, d)` for a date string, `Date.UTC(getUTCFullYear(),
+getUTCMonth(), getUTCDate())` for a `Date`. The three call sites above now
+use these helpers. `tests/unit/calendar-days.test.ts` covers both copies
+(19 assertions) with explicit `now` values so the tests themselves are
+timezone-independent, including the exact WORKER-05 repro instant.
+
+Why UTC rather than the server's local time: the production Docker images set
+no `TZ` (Node defaults to UTC), CI runs UTC, and every existing
+`.toISOString().slice(0,10)` in the codebase and test fixtures already
+produces a UTC date string. Normalising to UTC makes dev, CI, and prod
+compute identical results and requires **zero test-fixture changes**. The
+only behavioural difference from a hypothetical Gulf-local interpretation is
+in the <=4h window each day between UTC midnight and GST midnight, where a
+reminder may fire one scan cycle earlier and a document may read as
+EXPIRED/EXPIRING_SOON a few hours sooner -- both harmless and, for a
+reminder, arguably preferable.
+
+Consequences: WORKER-05 passes; the full suite is 178/178 (159 prior + 19
+new unit assertions) on this UTC+4 box, matching CI. No RLS policy, auth,
+tenant-isolation, migration, dependency, or HTTP-contract change --
+`date-fns` remains a dependency of both apps (still used for `addDays`/
+`subHours`). This is a correctness fix to shared date logic, recorded here
+per the "NEVER silently change architecture decisions" rule; it is not one
+of the hard Review Gates. Generalises ADR-028's lesson once more: a fixed,
+UTC-only set of test environments hid an environment-dependent bug until the
+suite was finally run somewhere else.
