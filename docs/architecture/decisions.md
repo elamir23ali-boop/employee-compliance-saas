@@ -1345,3 +1345,59 @@ per the "NEVER silently change architecture decisions" rule; it is not one
 of the hard Review Gates. Generalises ADR-028's lesson once more: a fixed,
 UTC-only set of test environments hid an environment-dependent bug until the
 suite was finally run somewhere else.
+
+## ADR-034: RLS-06 scoped to the E0 fixture tenants so it survives E6 seed data
+
+Date: E6 (Phase 1 -- seed infrastructure)
+Status: ACCEPTED
+
+Context: E6 Phase 1 introduces `tools/seed/` -- a synthetic-data generator that
+inserts tens of thousands of employees/documents into `public.employees` /
+`public.documents` (in five dedicated load-test tenants, `slug LIKE 'seed-%'`,
+all emails on `@test.invalid`) for the scale/load work in Phases 2-6. The E6
+brief asserts "seed data must not affect existing tests -- they use different
+email domains / tenants," and that holds for every row-count assertion in
+`tests/security/**` and `tests/integration/**` *except one*:
+
+`tests/security/rls.test.ts`'s RLS-06 ("migration_user bypasses RLS -> sees
+all 15 rows") issues an **unscoped** `SELECT * FROM employees` over the
+`migration_user` (BYPASSRLS) connection and asserts `rowCount === 15` -- the
+exact size of the E0 seed. Every other count assertion in that file (RLS-01
+`=== 5`, RLS-02/03/04 `=== 0`) runs under a `SET LOCAL app.current_tenant_id`
+for one E0 tenant, so RLS filters the seed tenants out and the numbers are
+unperturbed. RLS-06 is the only one that reads the whole table with no
+filter, so *any* employee seeding breaks it (observed: 1015). There is no
+seed-side fix -- the API, dashboards, RLS policies, and every Phase 2-6 load
+target all read `public.employees`; seeding into a separate schema/database
+would make the data invisible to exactly the code E6 exists to exercise.
+
+This is the same fragility class ADR-023 already documented for this very
+file: "an uncleaned row silently drifts other suites' exact row-count
+assertions (e.g. E0's rls.test.ts)." The prompt author did not account for
+RLS-06 being an unscoped global count. Raised with the user before touching
+the test; Option A (minimal, intent-preserving scope) approved.
+
+Decision: RLS-06 now reads
+`SELECT * FROM employees WHERE tenant_id = ANY(ARRAY[TENANT_A, TENANT_B,
+TENANT_C])` and still asserts `=== 15`. A `TENANT_C`
+(`cccccccc-cccc-cccc-cccc-cccccccccccc`) constant was added alongside the
+existing `TENANT_A`/`TENANT_B`. Nothing else in the test changes.
+
+What the test still proves is unchanged: `migration_user` sees all 15 E0
+fixture rows across all three tenants **with no tenant context set at all**,
+whereas the sibling RLS-01/03 show `app_user` sees 5 (one tenant's context)
+or 0 (no context). The BYPASSRLS-vs-FORCE-RLS contrast -- the entire point of
+RLS-06 -- is intact; the assertion is simply no longer coupled to the global
+contents of a table that a shared-DB test suite (and now the E6 seed) can
+legitimately add unrelated rows to. This is a strict robustness improvement,
+not a weakening: RLS-06 would also have survived the E2-era uncleaned-row
+drift ADR-023 describes, had it been written this way originally.
+
+Consequences: `npm run generate -- --count=N` followed by all three suites is
+now green with seed data present (the E6 "tests pass with seed data present"
+gate), and stays green after `npm run cleanup` restores the exact E0 baseline
+(15 employees / 40 documents / 3 tenants). No RLS policy, grant, or
+tenant-isolation logic changed -- only a test's query filter. `tools/seed/`
+is validation tooling only: it is typechecked and linted (added to the root
+`tsconfig.json` `include` and the root `lint` script) but is never imported
+by `apps/**` or `packages/**` and never runs in CI or at runtime.
