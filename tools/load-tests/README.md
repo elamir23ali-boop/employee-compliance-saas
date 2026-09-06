@@ -39,12 +39,16 @@ back-to-back. `npm run loadtest:tokens` writes the same tokens to
 
 | weight | endpoint |
 |---|---|
-| 28% | `GET /api/v1/dashboard/summary` |
-| 22% | `GET /api/v1/dashboard/document-stats` |
-| 20% | `GET /api/v1/dashboard/expiring?withinDays=` |
-| 15% | `GET /api/v1/employees?q=` (full-text) |
+| 26% | `GET /api/v1/dashboard/summary` |
+| 20% | `GET /api/v1/dashboard/document-stats` |
+| 18% | `GET /api/v1/dashboard/expiring?withinDays=` |
+| 14% | `GET /api/v1/employees?q=` (full-text) |
 | 12% | `GET /api/v1/employees?page=` (list page) |
+|  7% | `GET /api/v1/employees/:id/documents` (per-employee drill-down) |
 |  3% | `GET /health/ready` |
+
+`setup()` also fetches one real employee id per tenant so the drill-down hits
+a populated row.
 
 Tenant per iteration is picked weighted by employee count (Alpha 50 / Beta 25 /
 Gamma 15 / Delta 7 / Epsilon 3), so the 50k-employee tenant takes the brunt.

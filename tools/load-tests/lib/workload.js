@@ -45,6 +45,7 @@ export const trends = {
   dash_summary: new Trend('lat_dash_summary', true),
   dash_doc_stats: new Trend('lat_dash_doc_stats', true),
   dash_expiring: new Trend('lat_dash_expiring', true),
+  emp_documents: new Trend('lat_emp_documents', true),
 };
 
 /** ROPC token grant for one seed tenant's hr-manager user. Run once in setup(). */
@@ -69,6 +70,28 @@ export function fetchTokens() {
   return out;
 }
 
+/**
+ * Load-time context: a token per tenant, plus one real employee id per tenant
+ * (first row of the list endpoint) so the mix can exercise
+ * `GET /employees/:id/documents` -- a suspected O(n) path (no index on
+ * documents.employee_id, E6 Phase 4 finding). Run once in setup().
+ */
+export function fetchContext() {
+  const tokens = fetchTokens();
+  const sampleEmp = {};
+  for (const t of SEED_TENANTS) {
+    const res = http.get(`${BASE_URL}/api/v1/employees?page=1&limit=1`, {
+      headers: { Authorization: `Bearer ${tokens[t.slug]}` },
+      tags: { name: 'setup_emp' },
+    });
+    if (res.status === 200) {
+      const row = JSON.parse(res.body).data?.[0];
+      if (row?.id) sampleEmp[t.slug] = row.id;
+    }
+  }
+  return { tokens, sampleEmp };
+}
+
 /** Weighted pick of a seed tenant for this iteration. */
 export function pickTenant() {
   const total = SEED_TENANTS.reduce((s, t) => s + t.weight, 0);
@@ -88,36 +111,42 @@ function authGet(path, token, name) {
 }
 
 /**
- * One weighted read-mix iteration against `tenant`, using the token map from
- * setup(). Mix roughly models a compliance dashboard session: mostly
- * dashboard widgets + the odd employee search / list page, plus a cheap
- * unauthenticated health poll.
+ * One weighted read-mix iteration, using the context from setup(). Accepts
+ * either the full `{tokens, sampleEmp}` context or (back-compat) a bare token
+ * map. Mix roughly models a compliance dashboard session: mostly dashboard
+ * widgets + the odd employee search / list page / per-employee document
+ * drill-down, plus a cheap unauthenticated health poll.
  */
-export function readMixIteration(tokens) {
+export function readMixIteration(ctx) {
+  const tokens = ctx.tokens ?? ctx;
+  const sampleEmp = ctx.sampleEmp ?? {};
   const tenant = pickTenant();
   const token = tokens[tenant.slug];
   const roll = Math.random();
 
   let res;
   let key;
-  if (roll < 0.28) {
+  if (roll < 0.26) {
     key = 'dash_summary';
     res = authGet('/api/v1/dashboard/summary', token, key);
-  } else if (roll < 0.5) {
+  } else if (roll < 0.46) {
     key = 'dash_doc_stats';
     res = authGet('/api/v1/dashboard/document-stats', token, key);
-  } else if (roll < 0.7) {
+  } else if (roll < 0.64) {
     key = 'dash_expiring';
     const within = [7, 30, 60, 90][Math.floor(Math.random() * 4)];
     res = authGet(`/api/v1/dashboard/expiring?withinDays=${within}&limit=20`, token, key);
-  } else if (roll < 0.85) {
+  } else if (roll < 0.78) {
     key = 'emp_search';
     const q = SEARCH_TERMS[Math.floor(Math.random() * SEARCH_TERMS.length)];
     res = authGet(`/api/v1/employees?q=${encodeURIComponent(q)}&limit=20`, token, key);
-  } else if (roll < 0.97) {
+  } else if (roll < 0.9) {
     key = 'emp_list';
     const page = 1 + Math.floor(Math.random() * 25);
     res = authGet(`/api/v1/employees?page=${page}&limit=20`, token, key);
+  } else if (roll < 0.97 && sampleEmp[tenant.slug]) {
+    key = 'emp_documents';
+    res = authGet(`/api/v1/employees/${sampleEmp[tenant.slug]}/documents`, token, key);
   } else {
     key = 'health';
     res = http.get(`${BASE_URL}/health/ready`, { tags: { name: key } });

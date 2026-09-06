@@ -19,8 +19,7 @@
 // grabs them at t=0, so keep RAMP+HOLD+rampdown under ~4m or a long run will
 // start 401ing. For longer soaks, split into back-to-back runs.
 
-import { sleep } from 'k6';
-import { fetchTokens, readMixIteration } from '../lib/workload.js';
+import { fetchContext, readMixIteration } from '../lib/workload.js';
 
 const REQ_RATE = Number(__ENV.REQ_RATE || 80);
 const RAMP = __ENV.RAMP || '30s';
@@ -52,18 +51,19 @@ export const options = {
     lat_dash_expiring: ['p(95)<500'],
     lat_emp_search: ['p(95)<600'],
     lat_emp_list: ['p(95)<800'],
+    lat_emp_documents: ['p(95)<500'],
     checks: ['rate>0.99'],
   },
 };
 
 export function setup() {
-  const tokens = fetchTokens();
+  const ctx = fetchContext();
   console.log(`read-mix: REQ_RATE=${REQ_RATE}/s RAMP=${RAMP} HOLD=${HOLD} MAX_VUS=${MAX_VUS}`);
-  return { tokens };
+  return ctx;
 }
 
-export default function (data) {
-  readMixIteration(data.tokens);
+export default function (ctx) {
+  readMixIteration(ctx);
 }
 
 export function handleSummary(data) {
@@ -96,6 +96,7 @@ function textSummary(data) {
     line('  dashboard/expiring', m.lat_dash_expiring, L),
     line('  employees?q=', m.lat_emp_search, L),
     line('  employees?page=', m.lat_emp_list, L),
+    line('  emp/:id/documents', m.lat_emp_documents, L),
     line('  health/ready', m.lat_health, L),
     '',
   ].join('\n');

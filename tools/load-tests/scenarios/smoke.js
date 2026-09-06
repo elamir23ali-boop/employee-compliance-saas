@@ -5,7 +5,7 @@
 //   k6 run tools/load-tests/scenarios/smoke.js
 
 import { sleep } from 'k6';
-import { fetchTokens, readMixIteration } from '../lib/workload.js';
+import { fetchContext, readMixIteration } from '../lib/workload.js';
 
 export const options = {
   vus: 1,
@@ -17,10 +17,10 @@ export const options = {
 };
 
 export function setup() {
-  return { tokens: fetchTokens() };
+  return fetchContext();
 }
 
-export default function (data) {
-  readMixIteration(data.tokens);
+export default function (ctx) {
+  readMixIteration(ctx);
   sleep(0.2);
 }

@@ -17,6 +17,19 @@
  * test/tooling infrastructure, not application runtime code -- the
  * append-only / "never hard-delete" rules in CLAUDE.md govern the services,
  * not fixtures.
+ *
+ * E6 Phase 4 finding: `documents.employee_id` has NO index backing its FK to
+ * `employees` (002_schema.sql). `DELETE FROM employees` then re-checks that FK
+ * with a *sequential scan of documents per deleted row* -- O(n*m), ~11 min for
+ * one 50k-employee tenant at the 100k seed. Workaround here: prefer the
+ * superuser `DATABASE_ADMIN_URL` and `SET session_replication_role = replica`
+ * for the teardown session, which skips the RI trigger checks. This is safe
+ * because the deletes below already run in FK-dependency order (children
+ * first) so no orphan is ever created; it is a session setting, nothing
+ * schema- or data-permanent. Falls back to `DATABASE_MIGRATION_URL` (slow
+ * path) if the admin URL is absent or not a superuser. The real fix -- an
+ * index on `documents(employee_id)` -- is a migration (review gate); see
+ * docs/e6-results/phase-4-stress.md.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -41,13 +54,26 @@ const PER_TENANT_DELETES = [
 async function main(): Promise<void> {
   loadEnvLocal();
   const keepTenants = process.argv.slice(2).includes('--keep-tenants');
-  const url = process.env.DATABASE_MIGRATION_URL;
-  if (!url) throw new Error('DATABASE_MIGRATION_URL is not set (expected in .env.local)');
+  const url = process.env.DATABASE_ADMIN_URL ?? process.env.DATABASE_MIGRATION_URL;
+  if (!url) {
+    throw new Error('neither DATABASE_ADMIN_URL nor DATABASE_MIGRATION_URL is set (expected in .env.local)');
+  }
 
   const client = new Client({ connectionString: url });
   await client.connect();
   const seedIds = TENANTS.map((t) => t.id);
   try {
+    const { rows: superRows } = await client.query<{ s: boolean }>(
+      'SELECT rolsuper AS s FROM pg_roles WHERE rolname = current_user',
+    );
+    if (superRows[0]?.s) {
+      // Skip the FK RI trigger checks -- see the file header. Safe because the
+      // deletes below run children-first, so no orphan is created.
+      await client.query("SET session_replication_role = 'replica'");
+      console.log('  (superuser: session_replication_role=replica -- FK checks skipped for teardown)');
+    } else {
+      console.log('  (not superuser: FK RI checks active -- teardown of a large seed can take many minutes)');
+    }
     for (const tenant of TENANTS) {
       await client.query('BEGIN');
       const deleted: string[] = [];
