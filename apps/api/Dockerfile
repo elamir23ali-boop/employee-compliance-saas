@@ -49,6 +49,12 @@ RUN npm ci --omit=dev
 FROM base AS runner
 ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 ecs && adduser --system --uid 1001 --ingroup ecs apiuser
+# Alpine patches libssl3/libcrypto3 independently of the node:24-alpine base
+# image tag; explicitly upgrading here closes OpenSSL CVEs Trivy flags in
+# the base image (e.g. CVE-2026-14456) without waiting on a new base image
+# release. Same unpinned-version rationale as libc6-compat above.
+# hadolint ignore=DL3018
+RUN apk upgrade --no-cache libssl3 libcrypto3
 # npm/npx/corepack ship inside node:24-alpine and are never invoked at
 # runtime here (CMD calls `node` directly) -- removing them drops several
 # CVEs Trivy flags in npm's own vendored dependencies (tar, undici,

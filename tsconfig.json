@@ -5,6 +5,6 @@
     "moduleResolution": "node",
     "noEmit": true
   },
-  "include": ["tests/**/*.ts"],
+  "include": ["tests/**/*.ts", "tools/**/*.ts"],
   "exclude": ["node_modules", "apps", "packages"]
 }

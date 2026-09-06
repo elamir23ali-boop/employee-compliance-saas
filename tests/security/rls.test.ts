@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const TENANT_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TENANT_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const TENANT_C = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
 const FORGED_TENANT = 'deadbeef-dead-dead-dead-deadbeefcafe';
 
 async function connectAs(url: string | undefined): Promise<Client> {
@@ -60,10 +61,18 @@ describe('RLS tests', () => {
     await expect(appClient.query('SET SESSION ROLE migration_user')).rejects.toThrow();
   });
 
-  it('RLS-06: migration_user bypasses RLS -> sees all 15 rows', async () => {
+  it('RLS-06: migration_user bypasses RLS -> sees all 15 fixture rows with no tenant context set', async () => {
     const migrationClient = await connectAs(process.env.DATABASE_MIGRATION_URL);
     try {
-      const res = await migrationClient.query('SELECT * FROM employees');
+      // Scoped to the three E0 fixture tenants (not an unfiltered global
+      // count) so unrelated rows a shared-DB suite or the E6 seed tooling
+      // legitimately adds don't perturb it -- see ADR-034. The point stands:
+      // migration_user (BYPASSRLS) sees all 15 across every tenant with no
+      // `app.current_tenant_id` set, where RLS-01/03 show app_user sees 5 / 0.
+      const res = await migrationClient.query(
+        'SELECT * FROM employees WHERE tenant_id = ANY($1::uuid[])',
+        [[TENANT_A, TENANT_B, TENANT_C]],
+      );
       expect(res.rowCount).toBe(15);
     } finally {
       await migrationClient.end();

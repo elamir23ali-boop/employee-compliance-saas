@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { differenceInCalendarDays } from 'date-fns';
 import { ExpiryStatus, type expiryPolicies } from '@ecs/database';
+import { calendarDaysUntil } from '../common/calendar-days';
 
 export type ExpiryPolicyRow = typeof expiryPolicies.$inferSelect;
 
@@ -27,9 +27,7 @@ export class ExpiryService {
       return ExpiryStatus.VALID;
     }
 
-    const expiry = typeof expiryDate === 'string' ? new Date(expiryDate) : expiryDate;
-    const today = new Date();
-    const daysUntilExpiry = differenceInCalendarDays(expiry, today);
+    const daysUntilExpiry = calendarDaysUntil(expiryDate);
 
     if (daysUntilExpiry < 0) {
       if (policy.gracePeriodDays > 0 && daysUntilExpiry >= -policy.gracePeriodDays) {

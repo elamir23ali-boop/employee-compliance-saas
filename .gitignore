@@ -11,3 +11,5 @@ test-results/
 .DS_Store
 Thumbs.db
 tests/support/.totp-state.json
+tools/load-tests/.tokens.json
+tools/load-tests/results/

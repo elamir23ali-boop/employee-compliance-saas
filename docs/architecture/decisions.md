@@ -1271,3 +1271,234 @@ policy, `SET LOCAL` call site, or migration. If a future phase ever adds a
 session-level Postgres feature (`LISTEN`/`NOTIFY`, a non-`_xact` advisory
 lock, a `WITH HOLD` cursor, a plain session `SET`), revisit this ADR before
 assuming transaction-mode pooling still applies unmodified.
+
+## ADR-033: date-only comparisons are normalised to a UTC calendar frame
+
+Date: E6 (pre-Phase-1 hardening)
+Status: ACCEPTED
+
+Context: Surfaced while running the full suite on a UTC+4 developer
+workstation before starting E6 -- `tests/integration/worker.test.ts`'s
+WORKER-05 ("the daily scan finds a newly-expiring document and dispatches it
+end-to-end") failed deterministically, 158/159, with no seed data present
+and a clean working tree. It is not a flake and not E6-introduced: it is a
+latent timezone bug in how the codebase compared date-only values, invisible
+until now because CI and this repo's other environments all run in UTC.
+
+Root cause: `documents.expiry_date` is a Postgres `DATE` and the
+create/update DTOs carry a `YYYY-MM-DD` string (`z.string().date()`) -- both
+are calendar dates with no time and no timezone. Three call sites turned
+those into a day count with `differenceInCalendarDays(new Date(expiryString),
+new Date())` (or the `formatISO(new Date(), { representation: 'date' })`
+equivalent):
+
+- `apps/api/src/expiry/expiry.service.ts` -- the Expiry Engine's
+  `daysUntilExpiry`
+- `apps/worker/src/workers/reminder-scanner.worker.ts` -- the daily scan's
+  per-document threshold check
+- `apps/api/src/dashboard/dashboard.service.ts` -- the `/dashboard/expiring`
+  window bounds
+
+`new Date('2026-10-01')` parses as **UTC** midnight, but
+`differenceInCalendarDays` then reduces both operands to **local** midnight;
+`formatISO(..., { representation: 'date' })` likewise emits the local date.
+On any host not in UTC the two frames disagree by a day. Concretely, on this
+box (local `2026-09-02 00:17 +04:00`, i.e. UTC `2026-09-01 20:17`): a
+document created "30 days out" via the test helper
+(`addDays(new Date(), 30).toISOString().slice(0,10)` -> `'2026-10-01'`, a UTC
+date string) was measured by the scanner as **29** days out, so
+`matchReminderThreshold(29, [90,60,30,14,7,1])` -- an exact-day match by
+design (ADR-026) -- returned `null` and no reminder was ever enqueued. The
+Expiry Engine's `<=` widest-window check tolerates the same off-by-one
+without flipping status in almost all cases, which is why only the scanner's
+exact match broke visibly; the underlying defect was identical in all three
+places.
+
+Decision: Added `calendarDaysUntil(expiryDate, now?)` and
+`toUtcDateString(instant)` in `apps/api/src/common/calendar-days.ts`,
+mirrored verbatim in `apps/worker/src/workers/calendar-days.ts` (standalone
+process, no cross-app import -- same rule as `DEFAULT_REMINDER_DAYS_BEFORE`,
+ADR-016/ADR-017). Both do calendar arithmetic entirely in the UTC frame:
+`Date.UTC(y, m-1, d)` for a date string, `Date.UTC(getUTCFullYear(),
+getUTCMonth(), getUTCDate())` for a `Date`. The three call sites above now
+use these helpers. `tests/unit/calendar-days.test.ts` covers both copies
+(19 assertions) with explicit `now` values so the tests themselves are
+timezone-independent, including the exact WORKER-05 repro instant.
+
+Why UTC rather than the server's local time: the production Docker images set
+no `TZ` (Node defaults to UTC), CI runs UTC, and every existing
+`.toISOString().slice(0,10)` in the codebase and test fixtures already
+produces a UTC date string. Normalising to UTC makes dev, CI, and prod
+compute identical results and requires **zero test-fixture changes**. The
+only behavioural difference from a hypothetical Gulf-local interpretation is
+in the <=4h window each day between UTC midnight and GST midnight, where a
+reminder may fire one scan cycle earlier and a document may read as
+EXPIRED/EXPIRING_SOON a few hours sooner -- both harmless and, for a
+reminder, arguably preferable.
+
+Consequences: WORKER-05 passes; the full suite is 178/178 (159 prior + 19
+new unit assertions) on this UTC+4 box, matching CI. No RLS policy, auth,
+tenant-isolation, migration, dependency, or HTTP-contract change --
+`date-fns` remains a dependency of both apps (still used for `addDays`/
+`subHours`). This is a correctness fix to shared date logic, recorded here
+per the "NEVER silently change architecture decisions" rule; it is not one
+of the hard Review Gates. Generalises ADR-028's lesson once more: a fixed,
+UTC-only set of test environments hid an environment-dependent bug until the
+suite was finally run somewhere else.
+
+## ADR-034: RLS-06 scoped to the E0 fixture tenants so it survives E6 seed data
+
+Date: E6 (Phase 1 -- seed infrastructure)
+Status: ACCEPTED
+
+Context: E6 Phase 1 introduces `tools/seed/` -- a synthetic-data generator that
+inserts tens of thousands of employees/documents into `public.employees` /
+`public.documents` (in five dedicated load-test tenants, `slug LIKE 'seed-%'`,
+all emails on `@test.invalid`) for the scale/load work in Phases 2-6. The E6
+brief asserts "seed data must not affect existing tests -- they use different
+email domains / tenants," and that holds for every row-count assertion in
+`tests/security/**` and `tests/integration/**` *except one*:
+
+`tests/security/rls.test.ts`'s RLS-06 ("migration_user bypasses RLS -> sees
+all 15 rows") issues an **unscoped** `SELECT * FROM employees` over the
+`migration_user` (BYPASSRLS) connection and asserts `rowCount === 15` -- the
+exact size of the E0 seed. Every other count assertion in that file (RLS-01
+`=== 5`, RLS-02/03/04 `=== 0`) runs under a `SET LOCAL app.current_tenant_id`
+for one E0 tenant, so RLS filters the seed tenants out and the numbers are
+unperturbed. RLS-06 is the only one that reads the whole table with no
+filter, so *any* employee seeding breaks it (observed: 1015). There is no
+seed-side fix -- the API, dashboards, RLS policies, and every Phase 2-6 load
+target all read `public.employees`; seeding into a separate schema/database
+would make the data invisible to exactly the code E6 exists to exercise.
+
+This is the same fragility class ADR-023 already documented for this very
+file: "an uncleaned row silently drifts other suites' exact row-count
+assertions (e.g. E0's rls.test.ts)." The prompt author did not account for
+RLS-06 being an unscoped global count. Raised with the user before touching
+the test; Option A (minimal, intent-preserving scope) approved.
+
+Decision: RLS-06 now reads
+`SELECT * FROM employees WHERE tenant_id = ANY(ARRAY[TENANT_A, TENANT_B,
+TENANT_C])` and still asserts `=== 15`. A `TENANT_C`
+(`cccccccc-cccc-cccc-cccc-cccccccccccc`) constant was added alongside the
+existing `TENANT_A`/`TENANT_B`. Nothing else in the test changes.
+
+What the test still proves is unchanged: `migration_user` sees all 15 E0
+fixture rows across all three tenants **with no tenant context set at all**,
+whereas the sibling RLS-01/03 show `app_user` sees 5 (one tenant's context)
+or 0 (no context). The BYPASSRLS-vs-FORCE-RLS contrast -- the entire point of
+RLS-06 -- is intact; the assertion is simply no longer coupled to the global
+contents of a table that a shared-DB test suite (and now the E6 seed) can
+legitimately add unrelated rows to. This is a strict robustness improvement,
+not a weakening: RLS-06 would also have survived the E2-era uncleaned-row
+drift ADR-023 describes, had it been written this way originally.
+
+Consequences: `npm run generate -- --count=N` followed by all three suites is
+now green with seed data present (the E6 "tests pass with seed data present"
+gate), and stays green after `npm run cleanup` restores the exact E0 baseline
+(15 employees / 40 documents / 3 tenants). No RLS policy, grant, or
+tenant-isolation logic changed -- only a test's query filter. `tools/seed/`
+is validation tooling only: it is typechecked and linted (added to the root
+`tsconfig.json` `include` and the root `lint` script) but is never imported
+by `apps/**` or `packages/**` and never runs in CI or at runtime.
+
+## ADR-035: runtime Keycloak users for the E6 seed tenants
+
+Date: E6 (Phase 2 -- baseline 10K)
+Status: ACCEPTED
+
+Context: E6 Phases 2-6 measure real HTTP latency and run k6 load against
+endpoints that require a JWT (`/api/v1/employees`, `/api/v1/dashboard/*`,
+`/api/v1/exports|imports/*`). The tenant is resolved from the token's
+`org_slug` claim -> `tenants.slug` lookup (`tenant.middleware.ts` ->
+`tenant.resolver.ts`). `infra/docker/keycloak/realm-export.json` ships users
+only for the 3 E0 tenants (`org-tenant-a/b/c`); the 5 E6 seed tenants
+(`slug LIKE 'seed-%'`, ADR-034) have none, so no token can be minted for the
+tenants that actually hold the load-test data. Seeding into the E0 tenants
+instead was rejected: it breaks the `tenant A == 5` assertions in RLS-01 /
+POOL-01 / `keycloak.test.ts` with seed data present, a wider blast radius
+than ADR-034. User approved provisioning runtime Keycloak users for the seed
+tenants.
+
+Decision: `tools/seed/keycloak-users.ts` (`npm run seed:users` /
+`npm run seed:users -- --delete`) provisions one `hr-manager` user per seed
+tenant (`seed-e6-<slug>@e6.local` / `SeedPass123!`,
+attribute `org_slug=<seed slug>`) via the Keycloak **admin API** -- the same
+mechanism `tests/support/keycloak-admin.ts` already uses (its
+`setAccessTokenLifespan()` does a runtime `PUT /admin/realms/e0-test`).
+`hr-manager` (role hierarchy level 4) is the one role that covers every
+endpoint E6 exercises (dashboard/employee reads = viewer+, imports =
+hr-staff+, exports = hr-manager+).
+
+One realm-level change was unavoidable and is done by the same script:
+**Keycloak 26's declarative user profile silently drops any attribute not
+declared in the profile.** `realm-export.json` configures no user profile, so
+the *imported* E0 users keep their `org_slug` (import bypasses the filter) but
+an admin-API-created user loses it -> every request 403s "Missing org_slug
+claim" (confirmed empirically). The script therefore also declares `org_slug`
+as an **optional** attribute in the realm user profile
+(`PUT /admin/realms/e0-test/users/profile`) -- the narrowest possible fix
+(declaring one attribute, not flipping `unmanagedAttributePolicy` to `ENABLED`
+which would permit arbitrary attributes). `--delete` removes both the users
+and the profile attribute, restoring the original realm state. Verified
+non-breaking for E0: all three suites are 178/178 with the profile attribute
+declared and the seed users present.
+
+What is NOT changed: `realm-export.json` on disk, the `e0-api` client, the
+`org_slug` protocol mapper, token lifespans, or any E0 user. The provisioning
+is runtime-only and fully reversible; the seed users are left in place across
+generate/cleanup cycles (cheap, reusable) and `npm run cleanup` deliberately
+does not touch Keycloak.
+
+Consequences: E6 measurements and k6 scripts can authenticate per seed tenant,
+isolated from the E0 fixtures, and Phase 4.5's cross-tenant isolation checks
+can use two seed tenants without touching E0. If this environment's Keycloak
+volume is ever reset, `npm run seed:users` must be re-run (it is idempotent).
+The `e6-results/` docs record the exact commands. No application code,
+migration, RLS policy, or CI change.
+
+## ADR-036: E6 gate -- dependency vulnerability remediation
+
+Date: E6 (Phase 6 -- performance report & gate)
+Status: ACCEPTED
+
+Context: E5's gate required `npm audit --audit-level=high` to exit 0 (6
+pre-existing moderate findings only, ADR-019/ADR-027). At the E6 gate that
+check exited 1 with **two HIGH findings**:
+
+1. `@faker-js/faker@9.9.0` -- GHSA-qxc2-j82w-r537, "`helpers.fake` exploitable
+   into arbitrary code execution". **Introduced by E6 itself** (Phase 1 added
+   `@faker-js/faker` as a devDependency for `tools/seed/generate.ts`). It is a
+   devDependency, used only by validation tooling that never ships, never runs
+   in CI, and never runs in production; the vulnerable API (`helpers.fake()`
+   with a caller-controlled template) is never called -- `generate.ts` uses
+   only `faker.person.firstName/lastName`, `faker.commerce.department`,
+   `faker.person.jobType`. So the vuln was not reachable even before the fix.
+2. `fast-uri` 3.0.0-3.1.5 -- four SSRF / host-confusion advisories. Transitive,
+   **pre-existing** (not E6's doing -- the advisories were published between
+   the E5 and E6 gates). A non-breaking fix was available.
+
+User approved: bump faker to v10 and run `npm audit fix`.
+
+Decision:
+- `@faker-js/faker` `^9.9.0` -> `^10.6.0` (`package.json` devDependency). The
+  four generators `generate.ts` uses are API-stable across the major; verified
+  by regenerating a 2,000-employee seed (names / departments / job titles all
+  correct) and running the full suite (178/178).
+- `npm audit fix` (non-breaking only, no `--force`): patched `fast-uri` and
+  `qs` to fixed versions within existing semver ranges.
+- Result: `npm audit --audit-level=high` exits 0. Six moderate findings
+  remain, all pre-existing and already accepted: `esbuild`/`drizzle-kit`
+  (dev-only introspection, never run against a real DB -- ADR-012/ADR-019) and
+  `uuid`/`exceljs` (`--force` would downgrade `exceljs` to 3.4.0, a breaking
+  change to the import/export feature -- ADR-027).
+
+What is NOT changed: no runtime dependency, no `apps/**` / `packages/**` code,
+no migration, no RLS/auth. `tools/seed/**` is the only code that imports the
+bumped package.
+
+Consequences: the E6 gate restores E5's "zero HIGH/CRITICAL" bar. The seed
+tooling now tracks the maintained faker line. The six moderate residuals carry
+forward unchanged; retiring `drizzle-kit`/`@esbuild-kit` and moving
+import/export off the old `exceljs`/`uuid` remain open items for a future
+dependency-hygiene pass.
