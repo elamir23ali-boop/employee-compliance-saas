@@ -1456,3 +1456,49 @@ can use two seed tenants without touching E0. If this environment's Keycloak
 volume is ever reset, `npm run seed:users` must be re-run (it is idempotent).
 The `e6-results/` docs record the exact commands. No application code,
 migration, RLS policy, or CI change.
+
+## ADR-036: E6 gate -- dependency vulnerability remediation
+
+Date: E6 (Phase 6 -- performance report & gate)
+Status: ACCEPTED
+
+Context: E5's gate required `npm audit --audit-level=high` to exit 0 (6
+pre-existing moderate findings only, ADR-019/ADR-027). At the E6 gate that
+check exited 1 with **two HIGH findings**:
+
+1. `@faker-js/faker@9.9.0` -- GHSA-qxc2-j82w-r537, "`helpers.fake` exploitable
+   into arbitrary code execution". **Introduced by E6 itself** (Phase 1 added
+   `@faker-js/faker` as a devDependency for `tools/seed/generate.ts`). It is a
+   devDependency, used only by validation tooling that never ships, never runs
+   in CI, and never runs in production; the vulnerable API (`helpers.fake()`
+   with a caller-controlled template) is never called -- `generate.ts` uses
+   only `faker.person.firstName/lastName`, `faker.commerce.department`,
+   `faker.person.jobType`. So the vuln was not reachable even before the fix.
+2. `fast-uri` 3.0.0-3.1.5 -- four SSRF / host-confusion advisories. Transitive,
+   **pre-existing** (not E6's doing -- the advisories were published between
+   the E5 and E6 gates). A non-breaking fix was available.
+
+User approved: bump faker to v10 and run `npm audit fix`.
+
+Decision:
+- `@faker-js/faker` `^9.9.0` -> `^10.6.0` (`package.json` devDependency). The
+  four generators `generate.ts` uses are API-stable across the major; verified
+  by regenerating a 2,000-employee seed (names / departments / job titles all
+  correct) and running the full suite (178/178).
+- `npm audit fix` (non-breaking only, no `--force`): patched `fast-uri` and
+  `qs` to fixed versions within existing semver ranges.
+- Result: `npm audit --audit-level=high` exits 0. Six moderate findings
+  remain, all pre-existing and already accepted: `esbuild`/`drizzle-kit`
+  (dev-only introspection, never run against a real DB -- ADR-012/ADR-019) and
+  `uuid`/`exceljs` (`--force` would downgrade `exceljs` to 3.4.0, a breaking
+  change to the import/export feature -- ADR-027).
+
+What is NOT changed: no runtime dependency, no `apps/**` / `packages/**` code,
+no migration, no RLS/auth. `tools/seed/**` is the only code that imports the
+bumped package.
+
+Consequences: the E6 gate restores E5's "zero HIGH/CRITICAL" bar. The seed
+tooling now tracks the maintained faker line. The six moderate residuals carry
+forward unchanged; retiring `drizzle-kit`/`@esbuild-kit` and moving
+import/export off the old `exceljs`/`uuid` remain open items for a future
+dependency-hygiene pass.

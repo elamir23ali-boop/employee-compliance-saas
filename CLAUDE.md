@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E5 complete — Production Configuration & Operational Hardening (Pillars 1-4: health endpoints + graceful shutdown, production config + secret contract + PgBouncer validation, operational runbooks, integration gate)
+## Current Phase: E6 complete — Production Simulation & Scale Validation (validation-only, no features/migrations: seed tooling → 10K baseline → 100K load → 300K/500K stress → failure & resilience + backup/restore → performance report + gate)
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -153,6 +153,32 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   --audit-level=high` exit 0 (6 pre-existing moderate findings only,
   ADR-019/ADR-027), all 5 CI jobs green on a real GitHub Actions run (PR
   #6). `E5_GATE.md` records the final state; tagged `e5-complete`.
+- **E6 complete — Production Simulation & Scale Validation. Validation
+  only: no features, no migrations.** Built `tools/seed/` (faker-based
+  synthetic data, `@test.invalid` emails, batched multi-row INSERT under
+  RLS — `npm run generate/cleanup/seed:users`, ADR-034/ADR-035) and
+  `tools/load-tests/` (k6 v2.2.0 read-mix harness). Seeded 10K → 100K →
+  300K → 500K and drove the API with k6; injected real infra failures;
+  ran a `pg_dump`/`pg_restore` drill. Result: **every hot read path
+  degrades linearly (never worse-than-linear)**; sustainable throughput
+  scales ~1/n (~30 req/s at 100K → ~10 at 300K on the constrained
+  validation host); `GET /dashboard/expiring` (O(limit)) and `/health*`
+  (O(1)) stay flat. Five O(n) read paths + one resilience gap
+  (`packages/database/src/index.ts` `createDb()` has no `pool.on('error')`
+  → a Postgres restart or a single `pg_terminate_backend` on an idle
+  connection crashes API **and** worker; masked in prod by the container
+  `restart:` policy) are documented and scheduled for E7 — none is fixed
+  here. Self-heals cleanly from Redis / Keycloak / SMTP / worker-crash
+  failures. Backup/restore preserves and re-enforces RLS + FORCE RLS +
+  the NULLIF guard + all `tenant_isolation_*` policies + the
+  `audit_events` append-only grant (new `docs/runbooks/backup-restore.md`).
+  ADR-036: the E6-introduced `@faker-js/faker` HIGH advisory (devDep,
+  validation-tooling only) plus a pre-existing transitive `fast-uri` HIGH
+  were remediated (faker → v10, `npm audit fix`) to keep the gate at
+  E5's "zero HIGH/CRITICAL" bar. Full analysis:
+  `docs/e6-results/E6_PERFORMANCE_REPORT.md`; `E6_GATE.md` records the
+  final state; tagged `e6-complete`. Sustained-load capped at 300K (host
+  RAM below the 8 GB floor all epoch); 1M deferred.
 
 ## ABSOLUTE PROHIBITIONS
 
@@ -236,7 +262,9 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   with a mocked Drizzle handle), `npm run test:security`, `npm run test:integration`
   (both HTTP-driven: require `docker compose up` — Postgres+Redis+Keycloak —
   plus the API (`apps/api`) and worker (`apps/worker`) processes running locally)
-- Current state: 159/159 passing (71 unit / 52 security / 36 integration)
+- Current state: 178/178 passing (90 unit / 52 security / 36 integration)
+  — the unit count rose 71 → 90 with the ADR-033 calendar-days assertions
+  (commit `1c309b7`, pre-E6); E6 added no tests (validation-only)
 - **CI gap (ADR-023) addressed in E3 Pillar 1 (ADR-024), pending live verification:**
   `.github/workflows/ci.yml`'s `integration` job now runs `docker compose`
   (Postgres+Redis+Keycloak) directly on the runner — not GitHub Actions
