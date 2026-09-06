@@ -21,6 +21,9 @@
     "generate": "tsx tools/seed/generate.ts",
     "cleanup": "tsx tools/seed/cleanup.ts",
     "seed:users": "tsx tools/seed/keycloak-users.ts",
+    "loadtest:tokens": "tsx tools/load-tests/lib/fetch-tokens.ts",
+    "loadtest:smoke": "k6 run tools/load-tests/scenarios/smoke.js",
+    "loadtest:read-mix": "k6 run tools/load-tests/scenarios/read-mix.js",
     "db:migrate": "node infra/postgres/migrate.js",
     "docker:up": "docker compose -f infra/docker/docker-compose.yml up -d",
     "docker:down": "docker compose -f infra/docker/docker-compose.yml down"
