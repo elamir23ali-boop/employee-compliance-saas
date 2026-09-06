@@ -1502,3 +1502,67 @@ tooling now tracks the maintained faker line. The six moderate residuals carry
 forward unchanged; retiring `drizzle-kit`/`@esbuild-kit` and moving
 import/export off the old `exceljs`/`uuid` remain open items for a future
 dependency-hygiene pass.
+
+---
+
+## ADR-037: `pool.on('error')` in `createDb()` -- standalone resilience fix ahead of E7
+
+Date: post-E6 (standalone hardening PR)
+Status: ACCEPTED
+
+Context: E6's failure-injection drills (`docs/e6-results/phase-5-failure-resilience.md`,
+scenarios R1/R6) found that `packages/database/src/index.ts`'s `createDb()`
+builds `new Pool(config)` with no `pool.on('error', …)` listener. When
+Postgres sends a backend-terminated error (`57P01`) to an **idle** pooled
+client -- which happens on a Postgres restart, a failover, a routine
+`pg_terminate_backend` (connection poolers, DBAs, and RDS maintenance all do
+this), or a server-side idle timeout -- `pg-pool` re-emits it as an `'error'`
+event on the pool. With no listener, Node's default behavior is to `throw`,
+which crashes the process. Both `apps/api` (`DrizzleService`) and
+`apps/worker` (`main.ts`) construct their pool through this shared factory,
+so a single idle-connection kill took down both processes in E6 testing --
+masked in production only by the container `restart:` policy, which turns
+every blip into a hard restart with in-flight request loss and no drain.
+This was flagged in the E6 gate as the single highest-value, lowest-effort
+E7 backlog item (`E6_PERFORMANCE_REPORT.md` #1) and pulled forward into a
+standalone PR per user direction, rather than waiting for E7.
+
+`packages/database/src/index.ts` is not itself an RLS policy, auth/JWT
+change, tenant isolation change, or migration, so it does not trip a
+CLAUDE.md Review Gate; it is still the shared DB connection factory used by
+every runtime process, so the change here is intentionally the minimum
+possible diff.
+
+Decision: attach `pool.on('error', (err) => { ... })` in `createDb()`,
+logging a single structured, PII-free line (`action: 'db_pool_error'`,
+`err.message` only -- no query text, no connection string, no tenant/user
+data) and returning normally. This is exactly what the `node-postgres` docs
+prescribe: `pg-pool` already discards the dead client from the pool
+internally once the `'error'` event has a listener; an in-flight query
+issued against that client still rejects and surfaces as a normal DB error
+through the existing call path (every caller already handles DB errors --
+none of that changes). The only behavior this removes is the unhandled-event
+process crash. This mirrors the existing Redis guard
+(`HealthService`'s `this.redis.on('error', () => undefined)`) in shape, but
+logs rather than silently swallowing: a DB-layer error is rarer and more
+consequential than a transient Redis blip, and E4 Pillar 4's failure
+observability precedent (`notification_failure_rate_alert`) is to always log
+failures structurally rather than suppress them.
+
+What is NOT changed: no retry/reconnect logic, no circuit breaker, no
+change to `PoolConfig` (`min`/`max` etc., set by each caller), no migration,
+no RLS/auth/tenant-isolation code. The container `restart:` policy remains
+the last-resort safety net for a truly unrecoverable DB outage -- this fix
+addresses the specific case (an idle-client-only error) where the pool and
+process could otherwise have kept running.
+
+Consequences: a Postgres restart or a single `pg_terminate_backend` on an
+idle connection no longer crashes `apps/api`/`apps/worker`; the pool
+self-heals by discarding the dead client and reconnecting on next use, same
+as the pre-existing Redis path. Verified via a new unit test
+(`tests/unit/database.test.ts`) asserting the listener is registered and
+that invoking it logs without throwing, plus a full regression run
+(178/178: 90 unit / 52 security / 36 integration). Re-running E6's live
+chaos scenarios (R1/R6: `docker restart` on Postgres, `pg_terminate_backend`
+on an idle connection) against a running stack to confirm the process now
+survives is recommended before E7 but is out of scope for this PR.
