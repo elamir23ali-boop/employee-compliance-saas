@@ -75,11 +75,31 @@ aws ec2 revoke-security-group-egress --group-id sg-0182cee63337b13fb \
 
 ---
 
-## 3. Secrets Manager  (PENDING)
+## 3. Secrets Manager  (DONE -- ~$2/month)
 
-Five secrets under `/compliance/prod/*`, `aws/secretsmanager` KMS key,
-passwords via `openssl rand -hex 20`. `DB_HOST` in `/compliance/prod/database`
-is written back after the RDS endpoint exists. ARNs recorded here once created.
+Five `SecretString` JSON secrets, default `aws/secretsmanager` KMS key
+(`KmsKeyId: null` -- no customer-managed CMK, no $1/key/month charge),
+passwords via `openssl rand -hex 20`. Created `2026-09-09`, tagged
+`Project=employee-compliance-saas` / `Epoch=E7`.
+
+Naming note: the secrets were created **without** a leading slash --
+`compliance/prod/database`, not `/compliance/prod/database`. The IAM policy
+resource pattern (§4) and ADR-038's table are aligned to the created form:
+`arn:aws:secretsmanager:eu-west-1:218201720464:secret:compliance/prod/*`.
+A leading-slash pattern would NOT match these ARNs and the instance would
+get AccessDenied on every secret read.
+
+| Name | ARN | Keys |
+| --- | --- | --- |
+| `compliance/prod/database` | `...:secret:compliance/prod/database-I5kSwy` | DB_HOST, DB_PORT, DB_NAME, DB_APP_USER, DB_APP_PASSWORD, DB_MIGRATION_USER, DB_MIGRATION_PASSWORD, DB_MASTER_USER, DB_MASTER_PASSWORD |
+| `compliance/prod/redis` | `...:secret:compliance/prod/redis-c89JOv` | REDIS_HOST, REDIS_PORT, REDIS_PASSWORD |
+| `compliance/prod/keycloak` | `...:secret:compliance/prod/keycloak-duRl5L` | KC_HOSTNAME, KC_DB_PASSWORD, KC_ADMIN_PASSWORD |
+| `compliance/prod/smtp` | `...:secret:compliance/prod/smtp-HrSByi` | SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS |
+| `compliance/prod/app` | `...:secret:compliance/prod/app-2D1HnF` | NODE_ENV, PORT |
+
+`DB_HOST` in `compliance/prod/database` is a `CHANGE_ME` placeholder until
+the RDS endpoint exists (§5); the operator writes it back with
+`aws secretsmanager put-secret-value` once RDS is provisioned.
 
 ---
 
@@ -113,7 +133,7 @@ aws iam add-role-to-instance-profile \
 
 The inline policy grants (least privilege -- NOT the prompt's broad managed
 policies; see ADR-038):
-- Secrets Manager **read** on `/compliance/prod/*` + `kms:Decrypt` via
+- Secrets Manager **read** on `compliance/prod/*` + `kms:Decrypt` via
   Secrets Manager only
 - CloudWatch Logs **write** on `/compliance/*` only
 - S3 on `s3://compliance-prod-backups-218201720464` **only**
@@ -136,3 +156,10 @@ run `001..00N` migrations as `migration_user`, verify RLS/FORCE RLS/grants.
 | --- | --- | --- | --- |
 | Security group | compliance-app-sg | `sg-02d0a10340ecf1da6` | free |
 | Security group | compliance-rds-sg | `sg-0182cee63337b13fb` | free |
+| Secret | compliance/prod/database | `...:secret:compliance/prod/database-I5kSwy` | ~$0.40/mo |
+| Secret | compliance/prod/redis | `...:secret:compliance/prod/redis-c89JOv` | ~$0.40/mo |
+| Secret | compliance/prod/keycloak | `...:secret:compliance/prod/keycloak-duRl5L` | ~$0.40/mo |
+| Secret | compliance/prod/smtp | `...:secret:compliance/prod/smtp-HrSByi` | ~$0.40/mo |
+| Secret | compliance/prod/app | `...:secret:compliance/prod/app-2D1HnF` | ~$0.40/mo |
+| IAM role + instance profile | ec2-app-role | *(operator, admin session -- §4)* | free |
+| RDS instance | compliance-db | *(pending -- §5)* | ~$15-17/mo |

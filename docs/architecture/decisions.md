@@ -1701,8 +1701,10 @@ can reach EC2, RDS, S3, Secrets Manager, ECR. Therefore:
   `SecretsManagerReadWrite` / `CloudWatchLogsFullAccess` /
   `AmazonS3FullAccess`:
   * secretsmanager: `GetSecretValue`+`DescribeSecret` on
-    `arn:aws:secretsmanager:eu-west-1:218201720464:secret:/compliance/prod/*`
-    only, plus `kms:Decrypt` gated by
+    `arn:aws:secretsmanager:eu-west-1:218201720464:secret:compliance/prod/*`
+    only (no leading slash -- the secrets were created as `compliance/prod/*`;
+    a `/compliance/prod/*` pattern would not match their ARNs), plus
+    `kms:Decrypt` gated by
     `kms:ViaService = secretsmanager.eu-west-1.amazonaws.com`. Read-only:
     the instance never writes a secret (the RDS-endpoint write-back is done
     once by the operator/deploy step, not the app).
@@ -1724,15 +1726,16 @@ can reach EC2, RDS, S3, Secrets Manager, ECR. Therefore:
 ### Secrets Manager structure
 
 Five secrets, all `SecretString` JSON, all encrypted with the AWS-managed
-key `aws/secretsmanager`:
+key `aws/secretsmanager`. Names carry **no leading slash** (`compliance/prod/*`,
+not `/compliance/prod/*`) -- the IAM resource pattern above is aligned to this:
 
 | Name | Keys |
 | --- | --- |
-| /compliance/prod/database | DB_HOST, DB_PORT, DB_NAME, DB_APP_USER, DB_APP_PASSWORD, DB_MIGRATION_USER, DB_MIGRATION_PASSWORD, DB_MASTER_USER, DB_MASTER_PASSWORD |
-| /compliance/prod/redis | REDIS_HOST(=redis), REDIS_PORT(=6379), REDIS_PASSWORD |
-| /compliance/prod/keycloak | KC_HOSTNAME, KC_DB_PASSWORD, KC_ADMIN_PASSWORD |
-| /compliance/prod/smtp | SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS |
-| /compliance/prod/app | NODE_ENV(=production), PORT(=3000) |
+| compliance/prod/database | DB_HOST, DB_PORT, DB_NAME, DB_APP_USER, DB_APP_PASSWORD, DB_MIGRATION_USER, DB_MIGRATION_PASSWORD, DB_MASTER_USER, DB_MASTER_PASSWORD |
+| compliance/prod/redis | REDIS_HOST(=redis), REDIS_PORT(=6379), REDIS_PASSWORD |
+| compliance/prod/keycloak | KC_HOSTNAME, KC_DB_PASSWORD, KC_ADMIN_PASSWORD |
+| compliance/prod/smtp | SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS |
+| compliance/prod/app | NODE_ENV(=production), PORT(=3000) |
 
 All passwords generated with `openssl rand -hex 20` (40 hex chars: no `/`,
 `@`, `"`, or space -- safe for both an RDS master password and a libpq

@@ -8,7 +8,7 @@
         "secretsmanager:GetSecretValue",
         "secretsmanager:DescribeSecret"
       ],
-      "Resource": "arn:aws:secretsmanager:eu-west-1:218201720464:secret:/compliance/prod/*"
+      "Resource": "arn:aws:secretsmanager:eu-west-1:218201720464:secret:compliance/prod/*"
     },
     {
       "Sid": "DecryptSecretsViaSecretsManagerOnly",
