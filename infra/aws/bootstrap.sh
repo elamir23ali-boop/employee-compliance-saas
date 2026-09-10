@@ -1,6 +1,6 @@
 #!/bin/bash
 # EC2 user-data -- host bootstrap for the compliance SaaS app instance.
-# Target: Amazon Linux 2023, t2.micro (1 vCPU / 1 GiB). See ADR-038.
+# Target: Amazon Linux 2023 (kernel 6.18), t3.micro (2 vCPU / 1 GiB). See ADR-038.
 # Scope: host prep only (Docker + Compose plugin + swap). The application
 # stack (apps/api, apps/worker, Redis, Keycloak, Nginx) is deployed in a
 # later E7 phase, not here.

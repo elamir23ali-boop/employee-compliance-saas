@@ -1607,7 +1607,7 @@ Realistic run rate:
 
 | Resource | eu-west-1 on-demand | ~/month |
 | --- | --- | --- |
-| EC2 t2.micro (730 hrs) | $0.0126/hr | ~$9.20 |
+| EC2 t3.micro (730 hrs) | $0.0114/hr | ~$8.30 (free-tier eligible -- see below) |
 | RDS db.t3.micro PostgreSQL, Single-AZ (730 hrs) | $0.018/hr | ~$13.10 |
 | RDS storage 20 GB gp2 | $0.115/GB-mo | ~$2.30 |
 | RDS backups (~20 GB beyond free) | $0.095/GB-mo | ~$1-2 |
@@ -1625,9 +1625,9 @@ signup credit)"` and `freeTierExpiryDate: "2027-03-10 (credit expiry)"`, and
 `knownLimitations` gains "runs on a $100 credit with a ~3-month always-on
 runway; account suspends when the credit is exhausted".
 
-### Compute: single EC2 t2.micro, not ECS/Fargate
+### Compute: single EC2 t3.micro, not ECS/Fargate
 
-One t2.micro (1 vCPU, 1 GiB) runs, as Docker containers: apps/api,
+One t3.micro (2 vCPU, 1 GiB) runs, as Docker containers: apps/api,
 apps/worker, Redis (replaces ElastiCache), Keycloak 26.7.2 (self-hosted),
 behind Nginx (replaces an ALB). Rationale: ECS/Fargate task minimums and an
 ALB (~$16/month by itself) would more than double the run rate for zero
@@ -1636,8 +1636,21 @@ Node processes + Redis; container memory limits in
 `infra/aws/docker-compose.prod.yml` (Keycloak 512m, api/worker/redis 256m
 each) sum to 1280m > 1 GiB, so a 2 GB swapfile is provisioned in the
 bootstrap script. If the JVM proves unschedulable we upgrade to t3.small
-(~$15/month) rather than re-architecting -- documented as a known risk, not
-a blocker.
+(2 GiB, also free-tier eligible on this account) rather than
+re-architecting -- documented as a known risk, not a blocker.
+
+**Deviation, 2026-09-10:** the ADR originally specified `t2.micro` (the
+legacy 12-month Free Tier instance). `t2.micro` is **not** free-tier
+eligible on this post-2025 Free Plan account -- `run-instances` was
+rejected. `aws ec2 describe-instance-types --filters
+Name=free-tier-eligible,Values=true` in eu-west-1 returns: `t3.micro`,
+`t3.small`, `t4g.micro`, `t4g.small` (arm64), `c7i-flex.large`,
+`m7i-flex.large`. The AL2023 AMI in use is x86_64, so the t4g (Graviton)
+options are out without a rebuild. `t3.micro` is the 1:1 replacement for
+`t2.micro` -- identical 1 GiB RAM, current-gen Nitro, 2 vCPU instead of 1
+-- so the swap mitigation and the t3.small upgrade path above are both
+unchanged. AMI also bumped to `ami-0b3ba1acb76a70451`
+(`al2023-ami-2023.12.20260909.0-kernel-6.18-x86_64`).
 
 Keycloak is NOT moved to a managed IdP (Cognito): the entire auth test suite
 (ADR-004..008), the realm export, and jwt.strategy.ts's issuer pinning are
