@@ -187,21 +187,32 @@ survives instance stop/start, so the record is set once.
    so the write-back stays an operator CloudShell task (Phase 1 §5 step 2),
    not something the box can do.
 
-### Step 6a -- PREFLIGHT (`infra/aws/rds-preflight.sh`)
+### `infra/aws/rds-bootstrap.sh` -- one self-diagnosing script (run on the host)
 
-Run on the host first. Creates + drops two throwaway `_pf_*` roles; nothing
-else is written. Reports: PG version, existing DBs, `BYPASSRLS` allowed
-y/n, `SET ROLE` round-trip y/n. The real sequence (6b+) is generated from
-its output.
+Shipped to the box as a base64 blob (no repo checkout). psql runs from a
+`postgres:18` container; creds via the instance role. Steps:
 
-### Step 6b+ -- (blocked on 6a results)
+1. **Preflight** -- PG version, existing DBs/roles, a `CREATE ROLE ...
+   BYPASSRLS` probe, a `SET ROLE` round-trip (all throwaway `_pf_*` roles,
+   created + dropped). **If `BYPASSRLS` is denied it aborts here, having
+   mutated nothing** -- `001_roles.sql` can't run, and that is a locked-
+   architecture / Review Gate matter to escalate, not to patch.
+2. `CREATE DATABASE e0db` + `keycloak_db` (guarded by existence checks).
+3. Apply `001,002,003,005,006,007,008,009,010` to `e0db` in **one
+   transaction** (`psql -1`), so a failure rolls back to nothing. `004`
+   skipped.
+4. `ALTER ROLE app_user / migration_user` to the real
+   `compliance/prod/database` passwords (001 sets dev placeholders).
+5. Create the `keycloak` login role (password from
+   `compliance/prod/keycloak`), make it `OWNER` of `keycloak_db`.
+6. **Verify** -- `server_version` 18.x; `rolbypassrls` f/t for
+   app_user/migration_user; `app_user` on `audit_events` = SELECT+INSERT
+   only; ENABLE+FORCE RLS on all 8 tenant tables; 8 `tenant_isolation_*`
+   policies, all carrying the `NULLIF` guard; `tenants` has neither.
 
-`CREATE DATABASE e0db` + `keycloak_db`; apply `001-003,005-010`; `ALTER
-ROLE` both roles to the real secret passwords; verify `SELECT version()`
-is PG 18, `app_user` has SELECT+INSERT-only on `audit_events`, FORCE RLS +
-NULLIF guard + every `tenant_isolation_*` policy on `employees`,
-`documents`, `idempotency_keys`, `audit_events`, `expiry_policies`,
-`tenant_notification_policies`, `notification_log`, `import_batches`.
+It then prints the `DB_HOST` write-back command for the operator to run
+**from CloudShell** (the instance role is read-only on Secrets Manager, so
+the box itself can't do the write-back).
 
 ---
 
