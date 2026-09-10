@@ -1694,8 +1694,9 @@ renewal.
 ### DNS: Hostinger, not Route 53
 
 The domain `compliance.ai-english-os.online` is registered and its zone is
-managed at Hostinger. A single A record `compliance -> <EC2 Elastic IP>` is
-added manually there once the instance exists. Route 53 is not used (and
+managed at Hostinger. A single A record `compliance -> 3.251.22.171` (the
+Phase 2 Elastic IP, `eipalloc-08ee5ed802f1048d4`) is added manually there
+once the instance exists. Route 53 is not used (and
 `compliance-deploy` has no `route53:*` permission); the prompt's "$0.50/month
 hosted zone" line is dropped. `KC_HOSTNAME` is pinned to
 `https://compliance.ai-english-os.online/auth` (ADR-003/ADR-008 -- the issuer

@@ -101,16 +101,58 @@ aws ec2 run-instances \
   --query 'Instances[0].InstanceId' --output text
 ```
 
-## 5. Elastic IP  (PENDING -- after launch)
+### Result (2026-09-10)
+
+| Field | Value |
+| --- | --- |
+| Instance ID | `i-0779afd8bafdedbc9` |
+| Type / AMI | `t3.micro` / `ami-0b3ba1acb76a70451` |
+| State | `running` |
+| Instance profile | `arn:aws:iam::218201720464:instance-profile/ec2-app-role` (attached) |
+| Subnet / private IP | `subnet-01107a25b60d78929` / `172.31.19.92` |
+| Launch-time public IP | `54.246.246.246` (ephemeral -- replaced by the EIP below) |
+
+### Bootstrap verification (`aws ec2 get-console-output --latest`)
+
+cloud-init `modules:final` ran `bootstrap.sh` clean end to end:
+
+```
+bootstrap start: 2026-09-10T13:21:44Z
+Setting up swapspace version 1, size = 2 GiB
+Adding 2097148k swap on /swapfile.  Priority:-2 ...
+vm.swappiness = 10
+Complete!                       # dnf update
+Complete!                       # dnf install docker
+Docker Compose version v2.32.4
+bootstrap done: 2026-09-10T13:23:02Z
+Cloud-init v. 22.2.2 finished at Thu, 10 Sep 2026 13:23:02 +0000 ... Up 86.65 seconds
+```
+
+Swap active, Docker enabled, Compose v2 plugin resolving. No errors. SSH
+login verification (`ssh -i ~/.ssh/compliance-app.pem ec2-user@3.251.22.171`)
+is the operator's to run -- their /32 is already in `compliance-app-sg`.
+
+## 5. Elastic IP  (DONE -- 2026-09-10)
 
 ```
 aws ec2 allocate-address --domain vpc \
   --tag-specifications 'ResourceType=elastic-ip,Tags=[{Key=Name,Value=compliance-app-eip},{Key=Project,Value=employee-compliance-saas},{Key=Epoch,Value=E7}]'
-aws ec2 associate-address --instance-id <ID> --allocation-id <ALLOC>
+#   -> 3.251.22.171   eipalloc-08ee5ed802f1048d4
+aws ec2 associate-address --instance-id i-0779afd8bafdedbc9 --allocation-id eipalloc-08ee5ed802f1048d4
+#   -> eipassoc-0fdb567069a4a0ede
 ```
 
-Then the operator adds the Hostinger A record
-`compliance -> <EIP>` (ADR-038 § DNS).
+| Field | Value |
+| --- | --- |
+| Elastic IP | **`3.251.22.171`** |
+| Allocation ID | `eipalloc-08ee5ed802f1048d4` |
+| Association ID | `eipassoc-0fdb567069a4a0ede` |
+
+**Operator, out of band:** add the Hostinger DNS A record
+`compliance -> 3.251.22.171` (host `compliance`, zone
+`ai-english-os.online`). `KC_HOSTNAME` stays
+`https://compliance.ai-english-os.online/auth` (ADR-003/008). The EIP
+survives instance stop/start, so the record is set once.
 
 ## 6. RDS bootstrap from the host  (PENDING -- deferred from Phase 1)
 
@@ -129,7 +171,7 @@ SSH in, then:
 
 | Kind | Name | Id / ARN | Cost |
 | --- | --- | --- | --- |
-| Key pair | compliance-app | *(operator, §2)* | free |
-| EC2 instance | compliance-app | *(pending -- §4b)* | t3.micro, free-tier eligible (~$8.30/mo after) |
+| Key pair | compliance-app | `key-06ccb6157ddc00a43` (ed25519) | free |
+| EC2 instance | compliance-app | `i-0779afd8bafdedbc9` (t3.micro) | free-tier eligible (~$8.30/mo after) |
 | EBS root vol | compliance-app-root | 30 GB gp2, encrypted | ~$3.30/mo |
-| Elastic IP | compliance-app-eip | *(pending -- §5)* | ~$3.60/mo |
+| Elastic IP | compliance-app-eip | `3.251.22.171` / `eipalloc-08ee5ed802f1048d4` | ~$3.60/mo |
