@@ -43,6 +43,7 @@ P(){ local db=$1; shift; docker run --rm -i -e PGPASSWORD="$MPASS" postgres:18 \
 echo
 echo "=== [1/6] PREFLIGHT ==="
 P postgres -Atc "SELECT version()" || fail "cannot connect to RDS as $MUSER"
+P postgres -Atc "DROP ROLE IF EXISTS _pf_b; DROP ROLE IF EXISTS _pf_s" >/dev/null 2>&1
 echo "existing target DBs : $(P postgres -Atc "SELECT string_agg(datname,',') FROM pg_database WHERE datname IN ('e0db','compliance_db','keycloak_db')")"
 echo "existing app roles  : $(P postgres -Atc "SELECT coalesce(string_agg(rolname,','),'(none)') FROM pg_roles WHERE rolname IN ('app_user','migration_user','keycloak')")"
 
