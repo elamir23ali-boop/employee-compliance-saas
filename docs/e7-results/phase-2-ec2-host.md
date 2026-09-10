@@ -19,6 +19,7 @@ thing `compliance-rds-sg` admits on 5432.
 | App security group | `sg-02d0a10340ecf1da6` (`compliance-app-sg`) |
 | Instance profile | `ec2-app-role` (Phase 1 §4) |
 | AMI | `ami-0acc44548cf5d9ed9` -- `al2023-ami-2023.12.20260909.0-kernel-6.12-x86_64` (owner `amazon`; SSM `/aws/service/ami-amazon-linux-latest/*` is denied to `compliance-deploy`, so resolved via `ec2 describe-images`) |
+| SSH key pair | `compliance-app` (`key-06ccb6157ddc00a43`, ed25519) |
 | RDS endpoint | `compliance-db.cri4qamqaphw.eu-west-1.rds.amazonaws.com:5432` |
 
 ## 2. SSH key pair  (operator, out of band)
@@ -32,8 +33,8 @@ aws ec2 create-key-pair --key-name compliance-app \
 chmod 600 ~/.ssh/compliance-app.pem
 ```
 
-or imports an existing public key (`aws ec2 import-key-pair`). Key name
-recorded here once known: **`<pending>`**.
+or imports an existing public key (`aws ec2 import-key-pair`). Key name:
+**`compliance-app`** (`key-06ccb6157ddc00a43`, ed25519).
 
 ## 3. Host bootstrap script
 
@@ -42,7 +43,14 @@ recorded here once known: **`<pending>`**.
 in the `docker` group), Compose v2 plugin `v2.32.4` (static binary --
 not in AL2023 repos). The application stack is deployed in a later phase.
 
-## 4. Launch  (PENDING -- needs the key name from §2)
+## 4. Launch  (run from operator CloudShell)
+
+`compliance-deploy` has no `iam:PassRole` on `role/ec2-app-role` (ADR-038
+gave it no IAM perms), so `run-instances` with `--iam-instance-profile`
+fails `UnauthorizedOperation` from the automation principal. Rather than
+widen `compliance-deploy`, the launch is run once from the operator's
+admin CloudShell session; automation resumes for the Elastic IP (§5) and
+the host-side RDS bootstrap (§6).
 
 ```
 aws ec2 run-instances \
