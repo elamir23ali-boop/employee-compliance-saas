@@ -154,16 +154,54 @@ aws ec2 associate-address --instance-id i-0779afd8bafdedbc9 --allocation-id eipa
 `https://compliance.ai-english-os.online/auth` (ADR-003/008). The EIP
 survives instance stop/start, so the record is set once.
 
-## 6. RDS bootstrap from the host  (PENDING -- deferred from Phase 1)
+## 6. RDS bootstrap from the host  (IN PROGRESS)
 
-SSH in, then:
-1. `DB_HOST` write-back into `compliance/prod/database` (Phase 1 §5 step 2).
-2. `psql "$MASTER_URL" -c 'CREATE DATABASE keycloak_db'`.
-3. `infra/postgres/migrate.js` as `migration_user` -> `001..00N`.
-4. Verify: `SELECT version()` is PG 18; `app_user` has SELECT+INSERT only on
-   `audit_events`; FORCE RLS + NULLIF guard + every `tenant_isolation_*`
-   policy present on `employees`, `documents`, `idempotency_keys`,
-   `audit_events`, `expiry_policies`.
+### Decisions (operator, 2026-09-10)
+
+- **DB name `e0db`** -- the repo (all three `.env.production.example` URLs,
+  `001_roles.sql`'s `GRANT CONNECT ON DATABASE e0db`) standardises on `e0db`.
+  Migrations apply **unchanged** (ADR-038's stated intent). `CREATE DATABASE
+  e0db` on the instance; the auto-created `compliance_db` stays empty/unused
+  (cosmetic -- ADR-038 §RDS updated to say the live DB is `e0db`).
+- **Skip `004_seed_dev.sql`** -- apply `001-003` + `005-010` only. No E0
+  fixture rows. `008`'s "default policy per seeded tenant" INSERT..SELECT
+  then simply inserts 0 rows (no error). Synthetic data, if needed later,
+  goes in via `tools/seed/`.
+
+### Issues in the migration set vs RDS (found before running)
+
+1. `001_roles.sql` creates `app_user` / `migration_user` with **dev
+   passwords** -> a post-migration `ALTER ROLE ... PASSWORD` with the real
+   `compliance/prod/database` values is required (operational, not a file
+   change).
+2. `001_roles.sql` does `CREATE ROLE migration_user ... BYPASSRLS`.
+   `BYPASSRLS` normally requires a **true superuser**; RDS's `rds_superuser`
+   (= `compliance_master`) typically **cannot** set it. Must be confirmed
+   on the live PG 18 instance before deciding how `001` is handled -- this
+   touches CLAUDE.md's locked architecture + a Review Gate, so it is not
+   worked around unilaterally.
+3. EC2 host has Docker only (no Node / `psql` / repo). Migrations are shipped
+   to the box as a base64 blob and run via a `postgres:18` container.
+4. `DB_HOST` in `compliance/prod/database` is still `CHANGE_ME`. The instance
+   role is **read-only** on secrets (`GetSecretValue`/`DescribeSecret` only),
+   so the write-back stays an operator CloudShell task (Phase 1 §5 step 2),
+   not something the box can do.
+
+### Step 6a -- PREFLIGHT (`infra/aws/rds-preflight.sh`)
+
+Run on the host first. Creates + drops two throwaway `_pf_*` roles; nothing
+else is written. Reports: PG version, existing DBs, `BYPASSRLS` allowed
+y/n, `SET ROLE` round-trip y/n. The real sequence (6b+) is generated from
+its output.
+
+### Step 6b+ -- (blocked on 6a results)
+
+`CREATE DATABASE e0db` + `keycloak_db`; apply `001-003,005-010`; `ALTER
+ROLE` both roles to the real secret passwords; verify `SELECT version()`
+is PG 18, `app_user` has SELECT+INSERT-only on `audit_events`, FORCE RLS +
+NULLIF guard + every `tenant_isolation_*` policy on `employees`,
+`documents`, `idempotency_keys`, `audit_events`, `expiry_policies`,
+`tenant_notification_policies`, `notification_log`, `import_batches`.
 
 ---
 

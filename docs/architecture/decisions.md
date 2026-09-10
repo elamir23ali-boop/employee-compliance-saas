@@ -1778,6 +1778,14 @@ ARNs are recorded in `docs/e7-results/phase-1-aws-foundation.md`.
 - A second logical database `keycloak_db` is created inside the same
   instance (post-provision `CREATE DATABASE`) for Keycloak's own store --
   cheaper than a second RDS instance and isolated by database + role.
+- **Deviation, 2026-09-10:** the app database is **`e0db`**, not
+  `compliance_db`. The RDS instance was created with `--db-name
+  compliance_db`, but every `.env.production.example` URL and
+  `001_roles.sql`'s `GRANT CONNECT ON DATABASE e0db` hard-code `e0db`, and
+  ADR-038 wants "the reviewed migration set applied unchanged". So `e0db`
+  is created on the instance and used; the empty auto-created
+  `compliance_db` is left in place (harmless). Phase 2 §6 in
+  `docs/e7-results/phase-2-ec2-host.md`.
 - Post-provision verification (mirrors the E6 backup/restore integrity
   check): `SELECT version()` is PostgreSQL 18; the `001..00N` SQL migrations
   applied as `migration_user` recreate `app_user`/`migration_user` with the
