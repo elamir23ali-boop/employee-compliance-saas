@@ -145,7 +145,11 @@ policies; see ADR-038):
 
 ---
 
-## 5. RDS PostgreSQL  (CREATING -- 2026-09-10, ~$15-17/month)
+## 5. RDS PostgreSQL  (AVAILABLE -- 2026-09-10, ~$15-17/month)
+
+Endpoint: **`compliance-db.cri4qamqaphw.eu-west-1.rds.amazonaws.com:5432`**
+· AZ `eu-west-1c` · engine confirmed `18.4`.
+
 
 `postgres` 18.4 · `db.t3.micro` · 20 GB gp2 · **storage encrypted**
 (`aws/rds` KMS key) · Single-AZ · not public · `compliance-rds-sg` ·
@@ -191,19 +195,33 @@ aws rds modify-db-instance --db-instance-identifier compliance-db \
 original text: it is immutable after creation and this is a compliance
 data store. `aws/rds` managed key, no extra cost.
 
-### After `available`
-1. Record the endpoint address below.
-2. Write `DB_HOST` back into `compliance/prod/database`:
-   `aws secretsmanager put-secret-value --secret-id compliance/prod/database --secret-string ...`
-3. Create `keycloak_db` (post-provision `CREATE DATABASE`).
+### After `available` -- remaining Phase 1 steps (NOT yet done)
+
+1. Record the endpoint address. **DONE** (above).
+2. Write `DB_HOST` back into `compliance/prod/database`. **PENDING** --
+   operator runs (patches only `DB_HOST`, preserves every other key):
+   ```
+   CUR=$(aws secretsmanager get-secret-value --secret-id compliance/prod/database --query SecretString --output text)
+   printf '%s' "$CUR" | jq -c '.DB_HOST="compliance-db.cri4qamqaphw.eu-west-1.rds.amazonaws.com"' \
+     | aws secretsmanager put-secret-value --secret-id compliance/prod/database --secret-string file:///dev/stdin
+   ```
+3. Create `keycloak_db` (post-provision `CREATE DATABASE`). **PENDING** --
+   needs DB connectivity (see note).
 4. Run `001..00N` migrations as `migration_user`; verify RLS / FORCE RLS /
    NULLIF guard / `tenant_isolation_*` policies / `audit_events`
-   SELECT+INSERT-only grant.
+   SELECT+INSERT-only grant. **PENDING** -- needs DB connectivity.
+
+**Connectivity note:** `compliance-db` is `--no-publicly-accessible` and
+`compliance-rds-sg` allows 5432 only from `compliance-app-sg`. No EC2 host
+exists yet (Phase 2). Steps 3-4 therefore run **from the EC2 host in Phase
+2**, OR the operator temporarily authorizes their own /32 on
+`compliance-rds-sg` + flips `--publicly-accessible` for the bootstrap, then
+reverts both. Deferred to an explicit operator decision -- not done here.
 
 | Field | Value |
 | --- | --- |
 | Identifier | `compliance-db` |
-| Endpoint | *(pending -- fill after `available`)* |
+| Endpoint | `compliance-db.cri4qamqaphw.eu-west-1.rds.amazonaws.com` |
 | Port | 5432 |
 | Engine | postgres 18.4 |
 | Encrypted | yes (`aws/rds`) |
@@ -225,4 +243,4 @@ data store. `aws/rds` managed key, no extra cost.
 | Secret | compliance/prod/app | `...:secret:compliance/prod/app-2D1HnF` | ~$0.40/mo |
 | IAM role + instance profile | ec2-app-role | created, `compliance-ec2-app-policy` attached (§4) | free |
 | DB subnet group | compliance-db-subnets | 1a/1b/1c, vpc-0e33cd6ddb35e6748 | free |
-| RDS instance | compliance-db | creating -- endpoint TBD (§5) | ~$15-17/mo |
+| RDS instance | compliance-db | available -- `compliance-db.cri4qamqaphw.eu-west-1.rds.amazonaws.com:5432` (§5) | ~$15-17/mo |
