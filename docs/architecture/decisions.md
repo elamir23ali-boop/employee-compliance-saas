@@ -1750,8 +1750,17 @@ ARNs are recorded in `docs/e7-results/phase-1-aws-foundation.md`.
   auto-minor-version-upgrade left ON (RDS will move it toward 18.6+).
 - `db.t3.micro`, 20 GB `gp2` (not gp3 -- the prompt pins gp2), Single-AZ, not
   publicly accessible, `compliance-rds-sg`, DB name `compliance_db`,
-  master user `compliance_master` (avoids RDS-reserved names), 7-day
+  master user `compliance_master` (avoids RDS-reserved names),
+  **storage encrypted at rest** (`aws/rds` KMS key, no extra cost; immutable
+  post-creation, so set now -- a security-first compliance store), 7-day
   automated backups, **deletion protection ENABLED**.
+- **Deviation, 2026-09-10:** the account is on the AWS Free Plan, which
+  rejects `--backup-retention-period 7` (`FreeTierRestrictionError`). Created
+  with `--backup-retention-period 1` instead. Retention is mutable
+  post-creation, so `aws rds modify-db-instance --db-instance-identifier
+  compliance-db --backup-retention-period 7 --apply-immediately` restores the
+  intended value once the account is upgraded off the Free Plan. Tracked in
+  `docs/e7-results/phase-1-aws-foundation.md` §5.
 - A second logical database `keycloak_db` is created inside the same
   instance (post-provision `CREATE DATABASE`) for Keycloak's own store --
   cheaper than a second RDS instance and isolated by database + role.

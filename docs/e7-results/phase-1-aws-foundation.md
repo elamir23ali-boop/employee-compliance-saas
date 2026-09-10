@@ -103,7 +103,11 @@ the RDS endpoint exists (§5); the operator writes it back with
 
 ---
 
-## 4. IAM `ec2-app-role`  (PENDING -- operator does this from an admin session)
+## 4. IAM `ec2-app-role`  (DONE -- 2026-09-10, operator ran this from an admin session)
+
+`ec2-app-role` created with the inline policy `compliance-ec2-app-policy`
+(`infra/aws/iam/ec2-app-role-permissions.json`) attached; the console
+auto-created the matching instance profile.
 
 `compliance-deploy` has no IAM permissions. From an **admin** console/CLI
 session:
@@ -141,12 +145,70 @@ policies; see ADR-038):
 
 ---
 
-## 5. RDS PostgreSQL  (PENDING)
+## 5. RDS PostgreSQL  (CREATING -- 2026-09-10, ~$15-17/month)
 
-`postgres` 18.4 · `db.t3.micro` · 20 GB gp2 · Single-AZ · not public ·
-`compliance-rds-sg` · DB `compliance_db` · master `compliance_master` ·
-7-day backups · **deletion protection ON**. Then: create `keycloak_db`,
-run `001..00N` migrations as `migration_user`, verify RLS/FORCE RLS/grants.
+`postgres` 18.4 · `db.t3.micro` · 20 GB gp2 · **storage encrypted**
+(`aws/rds` KMS key) · Single-AZ · not public · `compliance-rds-sg` ·
+subnet group `compliance-db-subnets` · DB `compliance_db` · master
+`compliance_master` · **deletion protection ON** · `copy-tags-to-snapshot`.
+
+```
+CREDS=$(aws secretsmanager get-secret-value --secret-id compliance/prod/database --query SecretString --output text)
+aws rds create-db-instance \
+  --db-instance-identifier compliance-db \
+  --engine postgres --engine-version 18.4 \
+  --db-instance-class db.t3.micro \
+  --allocated-storage 20 --storage-type gp2 --storage-encrypted \
+  --no-multi-az --no-publicly-accessible \
+  --db-name compliance_db \
+  --master-username "$(echo "$CREDS" | jq -r .DB_MASTER_USER)" \
+  --master-user-password "$(echo "$CREDS" | jq -r .DB_MASTER_PASSWORD)" \
+  --vpc-security-group-ids sg-0182cee63337b13fb \
+  --db-subnet-group-name compliance-db-subnets \
+  --backup-retention-period 1 \
+  --deletion-protection --copy-tags-to-snapshot \
+  --tags Key=Name,Value=compliance-db Key=Project,Value=employee-compliance-saas Key=Epoch,Value=E7
+```
+
+**Backup-retention deviation:** the plan (§ADR-038) calls for 7-day
+automated backups, but this account is on the AWS **Free Plan**, which
+rejects `--backup-retention-period 7`:
+
+```
+FreeTierRestrictionError: The specified backup retention period exceeds
+the maximum available to free tier customers.
+```
+
+Created with `--backup-retention-period 1`. Retention is mutable
+post-creation -- once the account is upgraded off the Free Plan:
+
+```
+aws rds modify-db-instance --db-instance-identifier compliance-db \
+  --backup-retention-period 7 --apply-immediately
+```
+
+**Storage encryption** (`--storage-encrypted`) was added beyond §ADR-038's
+original text: it is immutable after creation and this is a compliance
+data store. `aws/rds` managed key, no extra cost.
+
+### After `available`
+1. Record the endpoint address below.
+2. Write `DB_HOST` back into `compliance/prod/database`:
+   `aws secretsmanager put-secret-value --secret-id compliance/prod/database --secret-string ...`
+3. Create `keycloak_db` (post-provision `CREATE DATABASE`).
+4. Run `001..00N` migrations as `migration_user`; verify RLS / FORCE RLS /
+   NULLIF guard / `tenant_isolation_*` policies / `audit_events`
+   SELECT+INSERT-only grant.
+
+| Field | Value |
+| --- | --- |
+| Identifier | `compliance-db` |
+| Endpoint | *(pending -- fill after `available`)* |
+| Port | 5432 |
+| Engine | postgres 18.4 |
+| Encrypted | yes (`aws/rds`) |
+| Backup retention | 1 day (Free Plan cap; target 7) |
+| Deletion protection | ON |
 
 ---
 
@@ -161,5 +223,6 @@ run `001..00N` migrations as `migration_user`, verify RLS/FORCE RLS/grants.
 | Secret | compliance/prod/keycloak | `...:secret:compliance/prod/keycloak-duRl5L` | ~$0.40/mo |
 | Secret | compliance/prod/smtp | `...:secret:compliance/prod/smtp-HrSByi` | ~$0.40/mo |
 | Secret | compliance/prod/app | `...:secret:compliance/prod/app-2D1HnF` | ~$0.40/mo |
-| IAM role + instance profile | ec2-app-role | *(operator, admin session -- §4)* | free |
-| RDS instance | compliance-db | *(pending -- §5)* | ~$15-17/mo |
+| IAM role + instance profile | ec2-app-role | created, `compliance-ec2-app-policy` attached (§4) | free |
+| DB subnet group | compliance-db-subnets | 1a/1b/1c, vpc-0e33cd6ddb35e6748 | free |
+| RDS instance | compliance-db | creating -- endpoint TBD (§5) | ~$15-17/mo |
