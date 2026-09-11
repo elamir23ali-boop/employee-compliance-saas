@@ -46,7 +46,12 @@ services:
         awslogs-region: eu-west-1
         awslogs-group: /compliance/redis
         awslogs-create-group: 'true'
-        awslogs-stream-prefix: compliance
+        # `tag`, not `awslogs-stream-prefix` -- that option name is ECS task
+        # definitions' logConfiguration field, not a valid opt for Docker
+        # Engine's native awslogs driver (docker up rejected it: "unknown
+        # log opt 'awslogs-stream-prefix'"). `tag` is the real per-stream
+        # naming knob this driver supports.
+        tag: 'compliance-redis'
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.2
@@ -103,7 +108,7 @@ services:
         awslogs-region: eu-west-1
         awslogs-group: /compliance/keycloak
         awslogs-create-group: 'true'
-        awslogs-stream-prefix: compliance
+        tag: 'compliance-keycloak'
 
   api:
     image: ${ECR_REGISTRY}/compliance-api:${IMAGE_TAG}
@@ -145,7 +150,7 @@ services:
         awslogs-region: eu-west-1
         awslogs-group: /compliance/api
         awslogs-create-group: 'true'
-        awslogs-stream-prefix: compliance
+        tag: 'compliance-api'
 
   worker:
     image: ${ECR_REGISTRY}/compliance-worker:${IMAGE_TAG}
@@ -178,4 +183,4 @@ services:
         awslogs-region: eu-west-1
         awslogs-group: /compliance/worker
         awslogs-create-group: 'true'
-        awslogs-stream-prefix: compliance
+        tag: 'compliance-worker'
