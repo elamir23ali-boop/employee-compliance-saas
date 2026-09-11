@@ -19,8 +19,15 @@
 ## never typed or committed (CLAUDE.md: "NEVER hardcode secrets in source
 ## files").
 ##
-## Resource limits sum to 1280m against 1 GiB RAM + the 2 GB swapfile
-## infra/aws/bootstrap.sh already provisions for exactly this (ADR-038).
+## No per-container cpus/memory limits (deploy.resources.limits) -- this
+## host's kernel/cgroup v2 setup rejects docker compose's memory limits
+## ("cannot enter cgroupv2 with domain controllers -- invalid state").
+## Containers run unconstrained by an explicit ceiling; the only memory
+## backstop is the 2 GB swapfile infra/aws/bootstrap.sh already
+## provisions. If Keycloak's JVM crowds out the other three under load,
+## ADR-038's own escape hatch is a t3.small upgrade (also free-tier
+## eligible on this account), not resurrecting cgroup limits this kernel
+## can't apply.
 ##
 ## Usage: docker compose -f infra/aws/docker-compose.prod.yml
 ##   --env-file .env.prod up -d
@@ -30,11 +37,6 @@ services:
     image: redis:7-alpine
     command: redis-server --requirepass ${REDIS_PASSWORD}
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
     healthcheck:
       test: ['CMD-SHELL', 'redis-cli -a ${REDIS_PASSWORD} ping']
       interval: 10s
@@ -87,11 +89,6 @@ services:
       # infra/docker/keycloak/realm-export.json content there directly).
       - /opt/compliance/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
     healthcheck:
       test:
         [
@@ -133,11 +130,6 @@ services:
     # compliance-app-sg already allows 80/443 from 0.0.0.0/0.
     ports:
       - '127.0.0.1:3000:3000'
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
     healthcheck:
       test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://localhost:3000/health/ready']
       interval: 10s
@@ -169,11 +161,6 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       SMTP_FROM_DEFAULT: ${SMTP_FROM_DEFAULT}
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
     # No HEALTHCHECK -- same ADR-029 decision #7 as the E5 compose file:
     # apps/worker exposes no HTTP endpoint; liveness is its structured
     # worker_shutdown_*/reminder_scan_completed log lines and BullMQ state.

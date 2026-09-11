@@ -33,7 +33,7 @@ export AWS_DEFAULT_REGION=eu-west-1
 REGISTRY="218201720464.dkr.ecr.eu-west-1.amazonaws.com"
 TAG="693777a"
 REPO_RAW="https://raw.githubusercontent.com/elamir23ali-boop/employee-compliance-saas/e7/aws-deployment"
-COMPOSE_SHA256="ba208204d1a4678f849a87dbda47dcd686894e015860a445a01bb7cde027bdd7"
+COMPOSE_SHA256="f383263078ea51c870eb28bfcc3ebd02ab7e6dbd7cdd38fd59d0133ffed8b735"
 REALM_SHA256="090ee72359bf0af36edea968d93e0e3aa9c25d1f4cbb9591caea6f0077ac2455"
 
 fail(){ echo; echo "FATAL: $*" >&2; exit 1; }
