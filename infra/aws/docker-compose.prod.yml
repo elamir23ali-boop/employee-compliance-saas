@@ -1,0 +1,181 @@
+## E7 Phase 3 -- production application stack for the compliance-app EC2 host.
+##
+## Distinct from infra/docker/docker-compose.production.yml (E5 Pillar 2):
+## that file builds api/worker locally and deliberately excludes Keycloak
+## ("productionising an identity provider is a distinct concern"). This one
+## is the real answer to that deferral -- it pulls pre-built images from
+## ECR (built + pushed from a dev machine, never built on this 1 GiB host)
+## and adds Keycloak 26.7.2 pointed at the real `keycloak_db` on RDS
+## instead of dev's ephemeral embedded database. See ADR-038 (E7 Phase 3
+## section) and docs/e7-results/phase-3-app-deployment.md.
+##
+## No `postgres` service -- RDS is the database (E7 Phase 1/2). No `nginx`
+## service yet -- added in Sub-phase C once the Hostinger DNS A record is
+## confirmed live and a real TLS cert can be issued.
+##
+## Secrets: every value below is `${VAR}` interpolation from a gitignored
+## .env.prod, rendered on the host from the 5 `compliance/prod/*` Secrets
+## Manager secrets via the instance role (infra/aws/deploy-stack.sh) --
+## never typed or committed (CLAUDE.md: "NEVER hardcode secrets in source
+## files").
+##
+## Resource limits sum to 1280m against 1 GiB RAM + the 2 GB swapfile
+## infra/aws/bootstrap.sh already provisions for exactly this (ADR-038).
+##
+## Usage: docker compose -f infra/aws/docker-compose.prod.yml
+##   --env-file .env.prod up -d
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a ${REDIS_PASSWORD} ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/redis
+        awslogs-create-group: 'true'
+        awslogs-stream-prefix: compliance
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.2
+    # `start`, not dev compose's `start-dev` (infra/docker/docker-compose.yml)
+    # -- ADR-038's own dev/prod distinction for the identity provider.
+    command: start --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      # Real host now (unlike dev's KC_HOSTNAME_STRICT: 'false' localhost
+      # convenience) -- no `/auth` path: Keycloak 26 (Quarkus) drops the
+      # legacy context path by default, and this matches what
+      # jwt.strategy.ts / KEYCLOAK_ISSUER below actually validate against
+      # (see the plan's ADR-038 correction note).
+      KC_HOSTNAME: ${KC_HOSTNAME}
+      KC_HOSTNAME_STRICT: 'true'
+      # Nginx (Sub-phase C) terminates TLS; Keycloak speaks plain HTTP
+      # behind it and trusts X-Forwarded-* for correct external URLs.
+      KC_HTTP_ENABLED: 'true'
+      KC_PROXY_HEADERS: xforwarded
+      # Unlike dev (embedded H2, ephemeral) -- the real keycloak_db
+      # database + keycloak role created by rds-bootstrap.sh (E7 Phase 2 §6).
+      KC_DB: postgres
+      KC_DB_URL_HOST: ${DB_HOST}
+      KC_DB_URL_PORT: '5432'
+      KC_DB_URL_DATABASE: keycloak_db
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+    volumes:
+      # Absolute host path, not a repo-relative one -- this compose file
+      # runs from /opt/compliance on the EC2 host, which has no repo
+      # checkout (infra/aws/deploy-stack.sh ships the same
+      # infra/docker/keycloak/realm-export.json content there directly).
+      - /opt/compliance/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/e0-test HTTP/1.1\r\nhost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -q '200\\|302' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/keycloak
+        awslogs-create-group: 'true'
+        awslogs-stream-prefix: compliance
+
+  api:
+    image: ${ECR_REGISTRY}/compliance-api:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: ${PORT}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL}
+      REDIS_URL: ${REDIS_URL}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER}
+      KEYCLOAK_JWKS_URI: ${KEYCLOAK_JWKS_URI}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+    # No host port published to the internet in Sub-phase B -- reachable
+    # only from inside the host (SSM-session smoke test) until Sub-phase C
+    # adds Nginx. 127.0.0.1-only bind keeps this true even though
+    # compliance-app-sg already allows 80/443 from 0.0.0.0/0.
+    ports:
+      - '127.0.0.1:3000:3000'
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://localhost:3000/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/api
+        awslogs-create-group: 'true'
+        awslogs-stream-prefix: compliance
+
+  worker:
+    image: ${ECR_REGISTRY}/compliance-worker:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM_DEFAULT: ${SMTP_FROM_DEFAULT}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    # No HEALTHCHECK -- same ADR-029 decision #7 as the E5 compose file:
+    # apps/worker exposes no HTTP endpoint; liveness is its structured
+    # worker_shutdown_*/reminder_scan_completed log lines and BullMQ state.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/worker
+        awslogs-create-group: 'true'
+        awslogs-stream-prefix: compliance
