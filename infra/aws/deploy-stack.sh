@@ -29,6 +29,20 @@
 # nothing here is reachable from the internet yet, deliberately, even
 # though compliance-app-sg already allows 80/443 from 0.0.0.0/0.
 set -uo pipefail
+
+# SSM Session Manager logs sessions in as `ssm-user`, never `ec2-user` or
+# root (AWS default for AL2023) -- and ssm-user is NOT in the `docker`
+# group (bootstrap.sh only adds ec2-user), nor can it write /opt. Rather
+# than depend on the operator remembering `sudo bash deploy-stack.sh`
+# every time (get it wrong once and you get a half-written /opt/compliance
+# from a previous non-root attempt, then a *different*, confusing failure
+# on the retry under sudo -- exactly what happened here), the script
+# elevates itself unconditionally so its execution context is always the
+# same regardless of how it was invoked.
+if [ "$(id -u)" -ne 0 ]; then
+  exec sudo -E bash "$0" "$@"
+fi
+
 export AWS_DEFAULT_REGION=eu-west-1
 REGISTRY="218201720464.dkr.ecr.eu-west-1.amazonaws.com"
 TAG="693777a"
@@ -42,9 +56,11 @@ verify(){ # verify <file> <expected-sha256>
   got=$(sha256sum "$f" | cut -d' ' -f1)
   [ "$got" = "$exp" ] || fail "$f checksum mismatch: got $got, expected $exp -- fetch corrupted or file changed upstream, do not proceed"
 }
-command -v jq >/dev/null || sudo dnf install -y -q jq
+command -v jq >/dev/null || dnf install -y -q jq
 
-mkdir -p /opt/compliance/keycloak
+docker compose version >/dev/null 2>&1 || fail "docker compose plugin not working -- run infra/aws/fix-compose-plugin.sh first (same curl-from-GitHub pattern as this script), then re-run this script"
+
+mkdir -p /opt/compliance/keycloak || fail "mkdir /opt/compliance/keycloak failed"
 
 echo "=== [1/6] fetch compose file + realm export from GitHub ==="
 curl -fsSL "$REPO_RAW/infra/aws/docker-compose.prod.yml" -o /opt/compliance/docker-compose.prod.yml || fail "curl docker-compose.prod.yml failed"
