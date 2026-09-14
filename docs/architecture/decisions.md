@@ -1698,9 +1698,15 @@ managed at Hostinger. A single A record `compliance -> 3.251.22.171` (the
 Phase 2 Elastic IP, `eipalloc-08ee5ed802f1048d4`) is added manually there
 once the instance exists. Route 53 is not used (and
 `compliance-deploy` has no `route53:*` permission); the prompt's "$0.50/month
-hosted zone" line is dropped. `KC_HOSTNAME` is pinned to
-`https://compliance.ai-english-os.online/auth` (ADR-003/ADR-008 -- the issuer
-must be a fixed configured value, never request-derived). An Elastic IP is
+hosted zone" line is dropped. `KC_HOSTNAME` is pinned to the bare hostname
+`compliance.ai-english-os.online` (ADR-003/ADR-008 -- the issuer must be a
+fixed configured value, never request-derived); `KEYCLOAK_ISSUER` is built
+from it as `https://${KC_HOSTNAME}/realms/e0-test`. **Correction, Phase 3:**
+this line originally read `.../auth` -- Keycloak 26 (Quarkus) drops the
+legacy `/auth` context path by default, and jwt.strategy.ts's issuer
+validation was built against the path-less form (see
+`docker-compose.prod.yml`'s own note and Sub-phase B's passing realm
+probe against `/realms/e0-test`, no `/auth` prefix). An Elastic IP is
 allocated and associated so the A record survives instance stop/start.
 
 ### IAM: least privilege, deviating from the prompt's managed-policy names

@@ -182,3 +182,40 @@ services:
         awslogs-group: /compliance/worker
         awslogs-create-group: 'true'
         tag: 'compliance-worker'
+
+  # Sub-phase C -- the actual public edge. `api`/`keycloak` stay
+  # 127.0.0.1-only (above); this is the one service bound to 0.0.0.0,
+  # matching compliance-app-sg's existing 80/443-from-0.0.0.0/0 rule
+  # (open since Phase 1, unused until now). infra/aws/setup-tls.sh owns
+  # /opt/compliance/nginx.conf's content -- it starts this service with
+  # infra/aws/nginx/nginx.bootstrap.conf (ACME challenge only, no TLS)
+  # to issue the first cert via the standard chicken-and-egg two-step,
+  # then overwrites the same path with infra/aws/nginx/nginx.conf (the
+  # real TLS + proxy config) and restarts. Never rebuilt/re-pulled by
+  # deploy-stack.sh's own `up -d` -- that script only touches
+  # redis/keycloak/api/worker.
+  nginx:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - /opt/compliance/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /opt/compliance/certbot-webroot:/var/www/certbot:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    # No HEALTHCHECK: nothing depends_on nginx, and the bootstrap config
+    # deliberately answers `/` with 503 before a cert exists -- a
+    # healthcheck would misreport "unhealthy" during that expected window.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/nginx
+        awslogs-create-group: 'true'
+        tag: 'compliance-nginx'
