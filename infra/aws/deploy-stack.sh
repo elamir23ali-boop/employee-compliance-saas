@@ -187,11 +187,18 @@ echo "   wrote /opt/compliance/.env.prod (600)"
 echo
 echo "=== [5/7] ECR login + pull ==="
 aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin "$REGISTRY" || fail "ecr login failed"
-docker compose -f /opt/compliance/docker-compose.prod.yml --env-file /opt/compliance/.env.prod pull || fail "docker compose pull failed"
+# Scoped to the 4 services this script owns -- since Sub-phase C, the
+# compose file also carries `nginx`, whose bind mount
+# (/opt/compliance/nginx.conf) doesn't exist until infra/aws/setup-tls.sh
+# creates it. A bare `pull`/`up -d` (no service args) would include it
+# and fail on that missing file -- confirmed 2026-09-14. setup-tls.sh
+# manages nginx's lifecycle exclusively; this script never touches it.
+STACK_SERVICES="redis keycloak api worker"
+docker compose -f /opt/compliance/docker-compose.prod.yml --env-file /opt/compliance/.env.prod pull $STACK_SERVICES || fail "docker compose pull failed"
 
 echo
 echo "=== [6/7] up -d ==="
-docker compose -f /opt/compliance/docker-compose.prod.yml --env-file /opt/compliance/.env.prod up -d || fail "docker compose up failed"
+docker compose -f /opt/compliance/docker-compose.prod.yml --env-file /opt/compliance/.env.prod up -d $STACK_SERVICES || fail "docker compose up failed"
 
 echo
 echo "=== [7/7] VERIFICATION (polling up to 3 min) ==="
