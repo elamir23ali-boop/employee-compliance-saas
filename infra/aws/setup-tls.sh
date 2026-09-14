@@ -80,6 +80,10 @@ echo "   fetched + verified all three"
 echo
 echo "=== [2/7] bring up nginx with the bootstrap (no-TLS) config ==="
 mkdir -p /opt/compliance/certbot-webroot || fail "mkdir certbot-webroot failed"
+# Explicit, not left to Docker to auto-create on first bind-mount: recent
+# Docker Engine versions (this host: 29.x-class) no longer reliably
+# create a missing bind-mount source directory implicitly.
+mkdir -p /etc/letsencrypt || fail "mkdir /etc/letsencrypt failed"
 cp /opt/compliance/nginx.bootstrap.conf /opt/compliance/nginx.conf || fail "cp bootstrap conf failed"
 docker compose -f "$COMPOSE" --env-file "$ENVFILE" up -d nginx || fail "docker compose up nginx (bootstrap) failed"
 
@@ -126,7 +130,14 @@ echo "-- https://$DOMAIN/realms/e0-test: $K (expect 200) --"
 
 echo
 echo "=== [6/7] install the renewal cron job ==="
-dnf install -y -q cronie && systemctl enable --now crond >/dev/null 2>&1
+if dnf install -y -q cronie && systemctl enable --now crond; then
+  echo "   cronie installed + crond running"
+else
+  # Not fatal -- the cert issued in [3/7]/[4/7] is already valid for 90
+  # days regardless; only auto-renewal is at risk. Surfaced loudly rather
+  # than swallowed so it doesn't get silently discovered at day 89.
+  echo "   WARNING: cronie install/enable failed -- renewal will NOT run automatically. Investigate manually: dnf install cronie; systemctl enable --now crond" >&2
+fi
 cat > /opt/compliance/renew-cert.sh <<'RENEWEOF'
 #!/bin/bash
 # Installed by infra/aws/setup-tls.sh. `certbot renew` is a no-op outside
