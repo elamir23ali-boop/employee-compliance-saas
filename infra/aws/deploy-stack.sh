@@ -109,29 +109,35 @@ echo "=== [3/6] render .env.prod ==="
 # unread secret field here risks silently pointing prod at the empty,
 # unmigrated compliance_db.
 #
-# ?sslmode=require -- default.postgres18 has rds.force_ssl=1 (confirmed
+# ?sslmode=no-verify -- default.postgres18 has rds.force_ssl=1 (confirmed
 # live via describe-db-parameters), so RDS rejects a plain-TCP startup
-# packet outright. pg-connection-string (bundled with the `pg` driver
-# apps/api and apps/worker already use) parses this query param and
-# upgrades the connection to TLS -- no application code change or image
-# rebuild needed, since DrizzleService/apps/worker's main.ts just hand
-# process.env.DATABASE_URL straight to `new Pool({connectionString})`.
-# `require` encrypts but does not verify the server certificate
-# (equivalent to `ssl: { rejectUnauthorized: false }`) -- acceptable here
-# because the path stays inside the VPC between compliance-app-sg and
-# compliance-rds-sg, never the public internet; full chain validation
-# (`verify-full` + the RDS CA bundle baked into the api/worker images)
-# is a real hardening gap, not implemented in this fix -- it needs a
-# Dockerfile change + image rebuild, out of scope for restoring
-# connectivity.
+# packet outright; TLS is mandatory. NOT ?sslmode=require: this repo's
+# pg-connection-string version (bundled with the `pg` driver apps/api
+# and apps/worker already use) only special-cases traditional libpq
+# "encrypt but don't verify" semantics under `no-verify` -- `require`
+# here just turns TLS on and leaves the ssl object's rejectUnauthorized
+# at Node's default (true), so it still does full chain validation.
+# Confirmed live: `require` produced `ERR code=SELF_SIGNED_CERT_IN_CHAIN`
+# from `new Pool({connectionString}).query('SELECT 1')` run inside the
+# api container itself -- Node's default trust store doesn't carry
+# AWS's RDS CA chain. `no-verify` sets `ssl.rejectUnauthorized = false`,
+# encrypting without validating the cert -- acceptable here because the
+# path stays inside the VPC between compliance-app-sg and
+# compliance-rds-sg, never the public internet. No application code
+# change or image rebuild needed either way, since DrizzleService/
+# apps/worker's main.ts just hand process.env.DATABASE_URL straight to
+# `new Pool({connectionString})`. Full chain validation (`verify-full`
+# + the RDS CA bundle baked into the api/worker images) is a real
+# hardening gap, not implemented in this fix -- it needs a Dockerfile
+# change + image rebuild, out of scope for restoring connectivity.
 cat > /opt/compliance/.env.prod <<ENVEOF
 ECR_REGISTRY=${REGISTRY}
 IMAGE_TAG=${TAG}
 NODE_ENV=${NODE_ENV}
 PORT=${PORT}
 DB_HOST=${DB_HOST}
-DATABASE_URL=postgresql://${DB_APP_USER}:${DB_APP_PASSWORD}@${DB_HOST}:5432/e0db?sslmode=require
-DATABASE_MIGRATION_URL=postgresql://${DB_MIGRATION_USER}:${DB_MIGRATION_PASSWORD}@${DB_HOST}:5432/e0db?sslmode=require
+DATABASE_URL=postgresql://${DB_APP_USER}:${DB_APP_PASSWORD}@${DB_HOST}:5432/e0db?sslmode=no-verify
+DATABASE_MIGRATION_URL=postgresql://${DB_MIGRATION_USER}:${DB_MIGRATION_PASSWORD}@${DB_HOST}:5432/e0db?sslmode=no-verify
 REDIS_PASSWORD=${REDIS_PASSWORD}
 REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/1
 KC_HOSTNAME=${KC_HOSTNAME}
