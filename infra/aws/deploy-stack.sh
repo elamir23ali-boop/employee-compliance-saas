@@ -58,11 +58,36 @@ verify(){ # verify <file> <expected-sha256>
 }
 command -v jq >/dev/null || dnf install -y -q jq
 
-docker compose version >/dev/null 2>&1 || fail "docker compose plugin not working -- run infra/aws/fix-compose-plugin.sh first (same curl-from-GitHub pattern as this script), then re-run this script"
+echo "=== [1/7] ensure docker compose plugin is present ==="
+# Not "run fix-compose-plugin.sh first, then re-run this script" anymore --
+# an SSM send-command invocation is one-shot and non-interactive, so a
+# script that just fails and points at a second script left the operator
+# doing a manual round trip every time this needed repairing (confirmed
+# recurring, 2026-09-14). Installs the exact same v2.32.4 static binary
+# bootstrap.sh puts at first boot, to the same system-wide path (not a
+# per-user ~/.docker/cli-plugins -- that would only be visible to
+# whichever user installed it, and this script always runs as root via
+# the self-elevation above) -- idempotent, safe to run every time
+# regardless of whether the plugin actually needs reinstalling.
+COMPOSE_PLUGIN_VERSION="v2.32.4"
+COMPOSE_PLUGIN_PATH="/usr/libexec/docker/cli-plugins/docker-compose"
+if ! docker compose version >/dev/null 2>&1; then
+  echo "   docker compose not working -- (re)installing the plugin"
+  mkdir -p "$(dirname "$COMPOSE_PLUGIN_PATH")" || fail "mkdir $(dirname "$COMPOSE_PLUGIN_PATH") failed"
+  curl -fsSL -o "$COMPOSE_PLUGIN_PATH" \
+    "https://github.com/docker/compose/releases/download/${COMPOSE_PLUGIN_VERSION}/docker-compose-linux-x86_64" \
+    || fail "docker compose plugin download failed"
+  chmod +x "$COMPOSE_PLUGIN_PATH"
+  docker compose version >/dev/null 2>&1 \
+    || fail "docker compose still not working after reinstalling $COMPOSE_PLUGIN_PATH -- something deeper is wrong (docker itself broken? wrong arch?); diagnose manually with: docker version; file $COMPOSE_PLUGIN_PATH"
+  echo "   installed to $COMPOSE_PLUGIN_PATH"
+else
+  echo "   already present"
+fi
 
 mkdir -p /opt/compliance/keycloak || fail "mkdir /opt/compliance/keycloak failed"
 
-echo "=== [1/6] fetch compose file + realm export from GitHub ==="
+echo "=== [2/7] fetch compose file + realm export from GitHub ==="
 curl -fsSL "$REPO_RAW/infra/aws/docker-compose.prod.yml" -o /opt/compliance/docker-compose.prod.yml || fail "curl docker-compose.prod.yml failed"
 curl -fsSL "$REPO_RAW/infra/docker/keycloak/realm-export.json" -o /opt/compliance/keycloak/realm-export.json || fail "curl realm-export.json failed"
 verify /opt/compliance/docker-compose.prod.yml "$COMPOSE_SHA256"
@@ -70,7 +95,7 @@ verify /opt/compliance/keycloak/realm-export.json "$REALM_SHA256"
 echo "   fetched + verified both files"
 
 echo
-echo "=== [2/6] fetch secrets (instance role) ==="
+echo "=== [3/7] fetch secrets (instance role) ==="
 DBSEC=$(aws secretsmanager get-secret-value --secret-id compliance/prod/database --query SecretString --output text) || fail "cannot read compliance/prod/database"
 REDISSEC=$(aws secretsmanager get-secret-value --secret-id compliance/prod/redis   --query SecretString --output text) || fail "cannot read compliance/prod/redis"
 KCSEC=$(aws secretsmanager get-secret-value --secret-id compliance/prod/keycloak  --query SecretString --output text) || fail "cannot read compliance/prod/keycloak"
@@ -101,7 +126,7 @@ done
 echo "   db host: $DB_HOST  |  kc host: $KC_HOSTNAME  |  node_env: $NODE_ENV"
 
 echo
-echo "=== [3/6] render .env.prod ==="
+echo "=== [4/7] render .env.prod ==="
 # DB_NAME deliberately hardcoded to e0db, NOT read from the DB_NAME key in
 # compliance/prod/database -- the RDS instance itself was created with
 # --db-name compliance_db (ADR-038's own recorded deviation), and e0db is
@@ -160,16 +185,16 @@ chmod 600 /opt/compliance/.env.prod
 echo "   wrote /opt/compliance/.env.prod (600)"
 
 echo
-echo "=== [4/6] ECR login + pull ==="
+echo "=== [5/7] ECR login + pull ==="
 aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin "$REGISTRY" || fail "ecr login failed"
 docker compose -f /opt/compliance/docker-compose.prod.yml --env-file /opt/compliance/.env.prod pull || fail "docker compose pull failed"
 
 echo
-echo "=== [5/6] up -d ==="
+echo "=== [6/7] up -d ==="
 docker compose -f /opt/compliance/docker-compose.prod.yml --env-file /opt/compliance/.env.prod up -d || fail "docker compose up failed"
 
 echo
-echo "=== [6/6] VERIFICATION (polling up to 3 min) ==="
+echo "=== [7/7] VERIFICATION (polling up to 3 min) ==="
 ok=1
 for i in $(seq 1 36); do
   H=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/health 2>/dev/null || echo 000)

@@ -52,7 +52,21 @@ COMPOSE="/opt/compliance/docker-compose.prod.yml"
 ENVFILE="/opt/compliance/.env.prod"
 [ -f "$ENVFILE" ] || fail "$ENVFILE not found -- run deploy-stack.sh (Sub-phase B) first"
 
-docker compose version >/dev/null 2>&1 || fail "docker compose plugin not working -- run infra/aws/fix-compose-plugin.sh first"
+# Same self-heal as deploy-stack.sh's [1/7] (2026-09-14: confirmed
+# recurring on this host, needed a manual fix-compose-plugin.sh round
+# trip once already) -- reinstall the plugin here too rather than
+# depending on a still-working state left over from a prior script run.
+COMPOSE_PLUGIN_VERSION="v2.32.4"
+COMPOSE_PLUGIN_PATH="/usr/libexec/docker/cli-plugins/docker-compose"
+if ! docker compose version >/dev/null 2>&1; then
+  mkdir -p "$(dirname "$COMPOSE_PLUGIN_PATH")" || fail "mkdir $(dirname "$COMPOSE_PLUGIN_PATH") failed"
+  curl -fsSL -o "$COMPOSE_PLUGIN_PATH" \
+    "https://github.com/docker/compose/releases/download/${COMPOSE_PLUGIN_VERSION}/docker-compose-linux-x86_64" \
+    || fail "docker compose plugin download failed"
+  chmod +x "$COMPOSE_PLUGIN_PATH"
+  docker compose version >/dev/null 2>&1 \
+    || fail "docker compose still not working after reinstalling $COMPOSE_PLUGIN_PATH -- diagnose manually: docker version; file $COMPOSE_PLUGIN_PATH"
+fi
 
 echo "=== [1/7] fetch updated compose file + both nginx configs ==="
 curl -fsSL "$REPO_RAW/infra/aws/docker-compose.prod.yml" -o "$COMPOSE" || fail "curl docker-compose.prod.yml failed"
