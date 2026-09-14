@@ -52,6 +52,30 @@ COMPOSE="/opt/compliance/docker-compose.prod.yml"
 ENVFILE="/opt/compliance/.env.prod"
 [ -f "$ENVFILE" ] || fail "$ENVFILE not found -- run deploy-stack.sh (Sub-phase B) first"
 
+render_nginx_conf(){ # render_nginx_conf <source-file>
+  local src=$1
+  # `rm -rf`, never a plain `cp` over the target: confirmed live
+  # 2026-09-14 that /opt/compliance/nginx.conf can already exist as a
+  # DIRECTORY, not a file -- the pre-fix deploy-stack.sh once tried to
+  # create the `nginx` container before this path existed on disk at
+  # all, and Docker created the bind-mount source as a directory. `cp`
+  # onto an existing directory copies INTO it rather than replacing it,
+  # so the stale directory silently survived every later `cp` here.
+  # rm -rf unconditionally removes whatever is there (file, directory,
+  # or nothing) before writing fresh content, every single call.
+  rm -rf /opt/compliance/nginx.conf || fail "rm -rf /opt/compliance/nginx.conf failed"
+  cp "$src" /opt/compliance/nginx.conf || fail "cp $src -> nginx.conf failed"
+  [ -f /opt/compliance/nginx.conf ] && [ ! -d /opt/compliance/nginx.conf ] \
+    || fail "/opt/compliance/nginx.conf is not a regular file after render -- inspect manually: ls -la /opt/compliance/nginx.conf"
+  # --force-recreate, not `up -d`/`restart`: a bind mount's file-vs-
+  # directory type is fixed at container-CREATE time on this Docker
+  # version, not re-resolved by a plain restart of an already-created
+  # container -- always tear down and recreate so the CURRENT host file
+  # is what actually gets mounted, regardless of what existed before.
+  docker compose -f "$COMPOSE" --env-file "$ENVFILE" up -d --force-recreate nginx \
+    || fail "docker compose up --force-recreate nginx failed"
+}
+
 # Same self-heal as deploy-stack.sh's [1/7] (2026-09-14: confirmed
 # recurring on this host, needed a manual fix-compose-plugin.sh round
 # trip once already) -- reinstall the plugin here too rather than
@@ -84,8 +108,7 @@ mkdir -p /opt/compliance/certbot-webroot || fail "mkdir certbot-webroot failed"
 # Docker Engine versions (this host: 29.x-class) no longer reliably
 # create a missing bind-mount source directory implicitly.
 mkdir -p /etc/letsencrypt || fail "mkdir /etc/letsencrypt failed"
-cp /opt/compliance/nginx.bootstrap.conf /opt/compliance/nginx.conf || fail "cp bootstrap conf failed"
-docker compose -f "$COMPOSE" --env-file "$ENVFILE" up -d nginx || fail "docker compose up nginx (bootstrap) failed"
+render_nginx_conf /opt/compliance/nginx.bootstrap.conf
 
 ok=0
 for i in $(seq 1 12); do
@@ -110,9 +133,8 @@ docker run --rm \
 echo "   certificate issued: /etc/letsencrypt/live/$DOMAIN/"
 
 echo
-echo "=== [4/7] swap in the real (TLS) config and restart nginx ==="
-cp /opt/compliance/nginx.conf.final /opt/compliance/nginx.conf || fail "cp final conf failed"
-docker compose -f "$COMPOSE" --env-file "$ENVFILE" restart nginx || fail "docker compose restart nginx failed"
+echo "=== [4/7] swap in the real (TLS) config and recreate nginx ==="
+render_nginx_conf /opt/compliance/nginx.conf.final
 
 echo
 echo "=== [5/7] VERIFICATION (polling up to 2 min) ==="
