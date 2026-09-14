@@ -88,6 +88,17 @@ services:
       # checkout (infra/aws/deploy-stack.sh ships the same
       # infra/docker/keycloak/realm-export.json content there directly).
       - /opt/compliance/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    # 127.0.0.1-only, same reasoning as api's binding below: Sub-phase C
+    # hasn't added Nginx/TLS yet, so nothing here should be reachable from
+    # the internet even though compliance-app-sg already allows 80/443
+    # from 0.0.0.0/0. Without this, Keycloak's own healthcheck still
+    # passes (it runs *inside* the container against 127.0.0.1:8080, so
+    # api/worker's `depends_on: condition: service_healthy` is satisfied
+    # either way) but nothing is listening on the host's port 8080 --
+    # deploy-stack.sh's own verification curl (and any operator's manual
+    # check) gets connection-refused (000), not a real HTTP response.
+    ports:
+      - '127.0.0.1:8080:8080'
     restart: unless-stopped
     healthcheck:
       test:
