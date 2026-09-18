@@ -40,7 +40,7 @@ fail(){ echo; echo "FATAL: $*" >&2; exit 1; }
 REPO_RAW="https://raw.githubusercontent.com/elamir23ali-boop/employee-compliance-saas/e7/aws-deployment"
 COMPOSE_SHA256="782a1d1f341b97029b8ed0ef255b2d7c604ac896671eb8af26258d9d27b57afc"
 NGINX_BOOTSTRAP_SHA256="cf0cd0b9a16b1dcc2a327324d95eef3d5169f66b1452df23877479b443d83537"
-NGINX_FINAL_SHA256="d88795faaccdfa189c184d413b953e7965b43390594c38d5ff1d5403c4c722ac"
+NGINX_FINAL_SHA256="68582b30eadf4bc3b4ce909359dc28795ffcb2d5c32abb5e0a0956592467ab86"
 
 verify(){ # verify <file> <expected-sha256>
   local f=$1 exp=$2 got
