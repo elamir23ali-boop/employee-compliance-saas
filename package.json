@@ -9,6 +9,11 @@
   "engines": {
     "node": ">=24.0.0"
   },
+  "overrides": {
+    "@nestjs/platform-express": {
+      "multer": "^2.4.0"
+    }
+  },
   "scripts": {
     "build": "turbo build",
     "dev": "turbo dev",

@@ -1566,3 +1566,69 @@ that invoking it logs without throwing, plus a full regression run
 chaos scenarios (R1/R6: `docker restart` on Postgres, `pg_terminate_backend`
 on an idle connection) against a running stack to confirm the process now
 survives is recommended before E7 but is out of scope for this PR.
+
+## ADR-040: remediate 4 newly-surfaced HIGH `npm audit` findings (multer, nodemailer, js-yaml)
+
+Date: post-E7 (standalone fix, discovered while gating two other standalone PRs)
+
+Status: ACCEPTED
+
+Context: opening PRs for ADR-038 (migration tracking) and ADR-039 (trust
+proxy) surfaced that `.github/workflows/ci.yml`'s `security-scan` job now
+fails on a vanilla `main` checkout, unrelated to either PR's own diff:
+`npm audit --audit-level=high` reports 12 vulnerabilities (6 moderate, 6
+HIGH), up from the previously-documented "6 pre-existing moderate findings
+only" baseline (ADR-019/ADR-027). New CVEs have been published against
+already-pinned dependency versions since that baseline was last verified --
+`npm audit` reflects the live advisory database, not a fixed-in-time scan.
+The 3 new HIGH findings:
+
+- **`js-yaml` 4.0.0-4.3.1** (`GHSA-2883-xcg3-v3hh`, CPU exhaustion via
+  merge keys) -- transitive, dev-tooling only.
+- **`nodemailer` <=9.1.0** (4 advisories, including a domain-allowlist
+  bypass that could deliver mail to an attacker-controlled domain) --
+  runtime, `apps/worker`'s `SmtpEmailDispatcher` (ADR-030).
+- **`multer` <=2.2.0** (4 advisories, all DoS/limit-bypass) -- runtime,
+  `apps/api`'s `.xlsx` import endpoint (`FileInterceptor`, ADR-027).
+
+This is "any security-related dependency update" per CLAUDE.md's Review
+Gates. Flagged to the operator before proceeding (the `multer` fix's
+naive path -- `npm audit fix --force` -- proposed a breaking
+`@nestjs/platform-express` v11 -> v12 major bump, too large a blast radius
+to apply without explicit sign-off); reviewed and approved before this fix.
+
+Decision:
+- `js-yaml` and `nodemailer`: `npm update` alone resolved both to
+  non-vulnerable versions within their already-declared semver ranges --
+  no `package.json` change, no breaking change, no code touched.
+- `multer`: NOT the `--force` major-bump path. `@nestjs/platform-express`
+  pins `multer` to an exact version (`2.2.0`) in its own `package.json`,
+  and every 11.x release up to the latest (`11.2.5`) still pins exactly
+  that version -- there is no non-breaking way to get a patched multer
+  through `@nestjs/platform-express` alone. `multer@2.4.0` (same major,
+  a semver-compatible minor bump) contains the fix for all 4 advisories.
+  Added a root-level npm `overrides` entry,
+  `{ "@nestjs/platform-express": { "multer": "^2.4.0" } }`, scoped to
+  that one dependency edge rather than a blanket `"multer": "^2.4.0"`
+  override (the scoped form is the more surgical of the two -- it can
+  never affect a hypothetical future direct `multer` dependency
+  elsewhere in the tree, though there is only the one occurrence today).
+  Verified the actual usage surface before trusting this: `apps/api`'s
+  only multer touchpoint is `FileInterceptor('file', { limits: {
+  fileSize } })` with default memory storage and the stock
+  `Express.Multer.File` type -- none of the advisories' fixes (disk-storage
+  internals, fileFilter race handling) touch that surface differently.
+
+What is NOT changed: the 2 pre-existing moderate findings (`esbuild` via
+`drizzle-kit`, dev-only; `uuid` via `exceljs`, transitive) are unchanged
+and still require a breaking bump each (`drizzle-kit@0.18.1`,
+`exceljs@3.4.0`) -- left as the same accepted residual risk
+ADR-019/ADR-027 already documented, not newly introduced by this PR. No
+RLS/auth/tenant-isolation/migration code touched.
+
+Consequences: `npm audit --audit-level=high` exits 0 again (6 moderate,
+0 high). Full regression run: 179/179 (91 unit / 52 security / 36
+integration, including the `.xlsx` import path that exercises `multer`
+directly), typecheck clean, lint clean, `npm run build` clean. CLAUDE.md's
+"6 pre-existing moderate findings" note is now current again rather than
+stale.
