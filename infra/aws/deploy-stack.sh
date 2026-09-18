@@ -218,7 +218,19 @@ echo "-- keycloak /realms/e0-test: $K (expect 200) --"
 [ "$K" = "200" ] || { echo "   Keycloak realm probe FAILED"; ok=0; }
 
 echo "-- worker startup log line --"
-if docker compose -f /opt/compliance/docker-compose.prod.yml logs worker 2>&1 | grep -q "Worker process started"; then
+# Retried, not one-shot: the HTTP checks above can already be 200 (e.g.
+# keycloak/api were healthy before this run touched them) and break the
+# outer loop with zero sleep, while `up -d` restarted worker concurrently
+# -- a fresh process needs a few seconds to boot and print this line.
+# Confirmed race 2026-09-18: a one-shot grep run immediately after `up -d`
+# reported NOT FOUND, but the line appeared in `docker compose logs`
+# seconds later on manual inspection.
+worker_ok=0
+for i in $(seq 1 12); do
+  docker compose -f /opt/compliance/docker-compose.prod.yml logs worker 2>&1 | grep -q "Worker process started" && { worker_ok=1; break; }
+  sleep 5
+done
+if [ "$worker_ok" = "1" ]; then
   echo "   worker: OK"
 else
   echo "   worker startup log line NOT FOUND"; ok=0
