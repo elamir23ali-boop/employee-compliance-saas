@@ -1566,3 +1566,61 @@ that invoking it logs without throwing, plus a full regression run
 chaos scenarios (R1/R6: `docker restart` on Postgres, `pg_terminate_backend`
 on an idle connection) against a running stack to confirm the process now
 survives is recommended before E7 but is out of scope for this PR.
+
+## ADR-039: `app.set('trust proxy', 1)` -- real client IP in `audit_events`
+
+Date: post-E7 (standalone fix, pre-pilot-onboarding)
+
+Status: ACCEPTED
+
+Context: `apps/api/src/common/audit-context.ts`'s `buildAuditContext()` sets
+`actorIp: req.ip`, and nothing in `apps/api/src/main.ts` ever called Express's
+`app.set('trust proxy', ...)`. Express's default (`trust proxy` disabled)
+makes `req.ip` return the immediate TCP peer address, never
+`X-Forwarded-For`. This was harmless through E6 (no reverse proxy existed in
+front of the API in any environment tested), but E7 Sub-phase C put Nginx in
+front of it in the one real deployment this repo has (flagged at the time,
+`e6ae642`'s "Known real gap flagged, not fixed" note, carried into
+`E7_GATE.md`'s `knownLimitations`): every `audit_events` row written since
+has recorded Nginx's own container IP as `actorIp`, never the real caller's,
+silently defeating the one piece of forensic data that column exists for.
+Called out as one of the two highest-priority items to fix before any pilot
+customer onboarding.
+
+`main.ts` is not an RLS policy, auth/JWT validation change, or tenant
+isolation logic -- `req.ip`'s resolution has no bearing on which tenant a
+request is scoped to (that's `TenantMiddleware`'s JWT-derived DB lookup,
+untouched here) or on request authentication (JWT validation is
+independent of the client IP). It does not trip a CLAUDE.md Review Gate.
+
+Decision: `app.set('trust proxy', 1)` in `main.ts`'s `bootstrap()`, right
+after `NestFactory.create<NestExpressApplication>(AppModule)` (retyped from
+the untyped default so `.set()` is available without a cast). `1` trusts
+exactly one hop -- the immediate upstream proxy -- matching the actual
+topology in every environment this runs in: Nginx talks to `api` directly
+over the compose network, with nothing else between them. Nginx already
+sends `X-Real-IP`/`X-Forwarded-For` (`infra/aws/nginx/nginx.conf`'s
+`proxy_set_header` lines, present since Sub-phase C), so no infra change is
+needed alongside this -- only the app trusting what's already being sent.
+
+What is NOT changed: no change to `audit-context.ts` itself (`req.ip` is
+already the right expression; it was only ever resolving the wrong thing
+upstream in Express's config), no change to RLS/auth/tenant-isolation code,
+no change to `apps/worker` (it has no HTTP server, no `req.ip` concept).
+
+Consequences: every `audit_events` row written after this deploys will
+carry the real client IP behind Nginx, not Nginx's own address. No
+automated test covers this directly -- it doesn't fit any of the three
+existing suites (`test:unit` is pure logic with no HTTP layer;
+`test:integration`/`test:security` hit the API container directly in the
+local Docker stack, with no Nginx-equivalent proxy in front of it to
+exercise `X-Forwarded-For` trust). Verification is a live check after
+redeploy: make one authenticated request through the real Nginx, then
+confirm the resulting `audit_events` row's `actor_ip` is the real caller's
+address, not a `172.x`/container address. Full regression run (179/179: 91
+unit / 52 security / 36 integration, typecheck/lint clean) confirms no
+existing behavior regressed. This is the second of the two items flagged in
+`E7_GATE.md` as blocking pilot onboarding, alongside ADR-038's migration
+tracking fix -- unlike that one, this fix requires an `apps/api` image
+rebuild, ECR push, and production redeploy to take effect, since it's
+compiled application code rather than a host-side script.
