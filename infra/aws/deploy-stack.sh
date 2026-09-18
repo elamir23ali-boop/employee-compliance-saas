@@ -184,7 +184,12 @@ KC_HOSTNAME=${KC_HOSTNAME}
 KC_DB_PASSWORD=${KC_DB_PASSWORD}
 KC_ADMIN_PASSWORD=${KC_ADMIN_PASSWORD}
 KEYCLOAK_ISSUER=${KC_HOSTNAME}/realms/e0-test
-KEYCLOAK_JWKS_URI=${KC_HOSTNAME}/realms/e0-test/protocol/openid-connect/certs
+# Internal address, NOT KC_HOSTNAME -- decoupled from KEYCLOAK_ISSUER
+# (jwt.strategy.ts fetches this URL directly; ISSUER is only ever
+# string-compared against the `iss` claim). nginx.conf doesn't route
+# /auth/realms/* to keycloak (only bare /realms), so KC_HOSTNAME's
+# advertised /auth URL 502'd here -- confirmed live 2026-09-18.
+KEYCLOAK_JWKS_URI=http://keycloak:8080/realms/e0-test/protocol/openid-connect/certs
 KEYCLOAK_CLIENT_ID=e0-api
 SMTP_HOST=${SMTP_HOST}
 SMTP_PORT=${SMTP_PORT}
