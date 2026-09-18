@@ -123,6 +123,21 @@ for v in DB_HOST DB_APP_USER DB_APP_PASSWORD DB_MIGRATION_USER DB_MIGRATION_PASS
          SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS NODE_ENV PORT; do
   eval "x=\${$v}"; [ -n "${x:-}" ] && [ "$x" != null ] || fail "$v missing from secret"
 done
+
+# compliance/prod/keycloak's KC_HOSTNAME is stored as a full URL
+# (https://compliance.ai-english-os.online/auth) -- Keycloak's own v2
+# hostname provider (docker-compose.prod.yml's KC_HOSTNAME env, passed
+# through unmodified) accepts and correctly uses that as-is, and real
+# issued tokens' `iss` claim confirm it: `.../auth/realms/e0-test`.
+# KEYCLOAK_ISSUER/JWKS_URI below must reuse it verbatim, NOT prepend
+# another `https://` (that produced `https://https://...`, an unparseable
+# URL -- the API's JWKS fetch failed outright and every real request
+# 401'd; confirmed live 2026-09-18 via E7 Phase 4's smoke test, the first
+# time any script actually exercised a real authenticated request against
+# this deployment). SMTP_FROM_DEFAULT needs a bare domain, not a full URL
+# with a path, so it strips the scheme/path separately.
+KC_BARE_HOST=$(echo "$KC_HOSTNAME" | sed -E 's#^https?://##; s#/.*##')
+[ -n "$KC_BARE_HOST" ] || fail "could not derive a bare hostname from KC_HOSTNAME=$KC_HOSTNAME"
 echo "   db host: $DB_HOST  |  kc host: $KC_HOSTNAME  |  node_env: $NODE_ENV"
 
 echo
@@ -168,8 +183,8 @@ REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/1
 KC_HOSTNAME=${KC_HOSTNAME}
 KC_DB_PASSWORD=${KC_DB_PASSWORD}
 KC_ADMIN_PASSWORD=${KC_ADMIN_PASSWORD}
-KEYCLOAK_ISSUER=https://${KC_HOSTNAME}/realms/e0-test
-KEYCLOAK_JWKS_URI=https://${KC_HOSTNAME}/realms/e0-test/protocol/openid-connect/certs
+KEYCLOAK_ISSUER=${KC_HOSTNAME}/realms/e0-test
+KEYCLOAK_JWKS_URI=${KC_HOSTNAME}/realms/e0-test/protocol/openid-connect/certs
 KEYCLOAK_CLIENT_ID=e0-api
 SMTP_HOST=${SMTP_HOST}
 SMTP_PORT=${SMTP_PORT}
@@ -177,7 +192,7 @@ SMTP_PORT=${SMTP_PORT}
 # these two are non-secret provider config, defaulted here rather than
 # invented as new Secrets Manager fields.
 SMTP_SECURE=true
-SMTP_FROM_DEFAULT=noreply@${KC_HOSTNAME}
+SMTP_FROM_DEFAULT=noreply@${KC_BARE_HOST}
 SMTP_USER=${SMTP_USER}
 SMTP_PASS=${SMTP_PASS}
 ENVEOF
@@ -216,6 +231,20 @@ echo "-- keycloak /realms/e0-test: $K (expect 200) --"
 [ "$H" = "200" ] || { echo "   API /health FAILED"; ok=0; }
 [ "$R" = "200" ] || { echo "   API /health/ready FAILED"; ok=0; }
 [ "$K" = "200" ] || { echo "   Keycloak realm probe FAILED"; ok=0; }
+
+echo "-- api's own KEYCLOAK_JWKS_URI (config sanity, not just reachability) --"
+# The 3 checks above never exercised the API's actual rendered
+# KEYCLOAK_ISSUER/JWKS_URI config -- a malformed value there (confirmed
+# live 2026-09-18: a doubled "https://https://..." from an earlier
+# version of this script) still passed all three, and only surfaced when
+# E7 Phase 4's smoke test made a real authenticated request. This reuses
+# the exact URL apps/api itself was just given, from inside the container
+# (not the host), so a hostname-resolution difference between the two
+# can't hide a break.
+J=$(docker compose -f /opt/compliance/docker-compose.prod.yml --env-file /opt/compliance/.env.prod exec -T api \
+  node -e "fetch(process.env.KEYCLOAK_JWKS_URI).then(r=>process.stdout.write(String(r.status))).catch(()=>process.stdout.write('000'))" 2>/dev/null || echo 000)
+echo "-- api's KEYCLOAK_JWKS_URI fetch: $J (expect 200) --"
+[ "$J" = "200" ] || { echo "   KEYCLOAK_JWKS_URI FAILED -- check KC_HOSTNAME in compliance/prod/keycloak"; ok=0; }
 
 echo "-- worker startup log line --"
 # Retried, not one-shot: the HTTP checks above can already be 200 (e.g.
