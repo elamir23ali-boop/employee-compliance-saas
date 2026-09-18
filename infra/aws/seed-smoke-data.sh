@@ -35,10 +35,18 @@ export AWS_DEFAULT_REGION=eu-west-1
 REPO_RAW="https://raw.githubusercontent.com/elamir23ali-boop/employee-compliance-saas/e7/aws-deployment"
 WORKDIR=/opt/compliance/seed-tools
 
-CONFIG_SHA256="a78be442f02ce55b9da85bc96a99689bae750306554696dd0b41a785afc1c613"
-DB_SHA256="e11ea828d27bc8d1bf9a7954a6c7864f85ac49a2623a5d581d27bd9da36ddad9"
-GENERATE_SHA256="3c7cb3dda57f0fc6ab14fc56246756cd3c29008cc55490e9e208ce726a5a7bf8"
-KCUSERS_SHA256="84fcd14191d8dfb5e20a4e9ca8671551bfa62be3da56dc0ee34cd9cbce6cb219"
+# Pinned against the git BLOB content (`git show HEAD:<path> | sha256sum`),
+# not a Windows working-tree read -- core.autocrlf=true on this dev box
+# rewrites LF->CRLF on checkout for .ts files (unlike *.sh, which
+# .gitattributes already forces to LF), so a naive `sha256sum` of the
+# checked-out file silently pins the wrong hash. Confirmed 2026-09-18: a
+# first attempt pinned via plain `sha256sum tools/seed/*.ts` and failed
+# every checksum on the host, since raw.githubusercontent.com serves the
+# real LF blob.
+CONFIG_SHA256="616f1b750cf79c30de4773185dfdfc511abc965a969c86750a202822e40d3d49"
+DB_SHA256="cc16952d9e7ea89afec5d66f19cc127f4719626e651934394fd688a503ff0575"
+GENERATE_SHA256="e824e5cf640cfd6417d55144e06d479b76398badcf37f98807be4b020136a366"
+KCUSERS_SHA256="e839eb4ddb65de2c8e46be4bf65d69e8a1f0c9cd97a4136abfec27fecc160e2c"
 
 fail(){ echo; echo "FATAL: $*" >&2; exit 1; }
 verify(){ # verify <file> <expected-sha256>
