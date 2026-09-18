@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './filters/http-exception.filter';
 
@@ -16,7 +17,14 @@ const SHUTDOWN_TIMEOUT_MS = 30_000;
 
 async function bootstrap(): Promise<void> {
   loadEnvLocal();
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // ADR-039: trust exactly one hop (Nginx, the only reverse proxy in front
+  // of this process in every real deployment) so Express's req.ip resolves
+  // the real client address from X-Forwarded-For instead of the immediate
+  // socket peer -- which, behind Nginx, is Nginx's own container IP.
+  // audit-context.ts's actorIp reads req.ip directly; without this every
+  // audit_events row recorded the proxy's IP, never the real caller's.
+  app.set('trust proxy', 1);
   app.useGlobalFilters(new HttpExceptionFilter());
   const port = Number(process.env.PORT ?? 3000);
   await app.listen(port);
