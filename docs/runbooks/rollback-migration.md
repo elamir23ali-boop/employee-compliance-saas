@@ -9,14 +9,18 @@ see the Warning section at the end.
 
 ## 1. Identify the migration to roll back
 
-There is no `schema_migrations` tracking table (see
-`docs/runbooks/deploy.md`'s own gap note) -- confirm exactly which file was
-last applied by cross-referencing:
+Since ADR-039, `schema_migrations` records exactly which files have been
+applied and when:
 
-- `git log -- packages/database/migrations/` on the deployed commit, and
-- the actual current schema (`\d <table>` / `information_schema.columns` /
-  `pg_indexes` for what that file was supposed to add -- the same
-  verification approach `deploy.md` step 3 uses).
+```sql
+SELECT filename, applied_at, backfilled FROM schema_migrations ORDER BY applied_at DESC LIMIT 5;
+```
+
+Cross-reference against `git log -- packages/database/migrations/` on the
+deployed commit, and the actual current schema (`\d <table>` /
+`information_schema.columns` / `pg_indexes` for what that file was supposed
+to add -- the same verification approach `deploy.md` step 3 uses) if you
+need to confirm the table's record matches reality.
 
 ## 2. Stop API and worker
 
@@ -59,6 +63,15 @@ There is no scripted/generic rollback -- write the exact inverse of the
 specific migration file, nothing templated. If the migration's own SQL
 file did anything inside a `SET ROLE migration_user` block (ADR-002), the
 rollback should too, for the same ownership reasons.
+
+Also delete the file's `schema_migrations` row, in the same session as the
+rollback SQL above -- otherwise a future `migrate.js` run will believe this
+migration is still applied and silently skip it forever, even though its
+effects were just reverted:
+
+```
+psql "<DATABASE_ADMIN_URL>" -c "DELETE FROM schema_migrations WHERE filename = '0NN_the_migration.sql';"
+```
 
 ## 5. Verify DB state
 
