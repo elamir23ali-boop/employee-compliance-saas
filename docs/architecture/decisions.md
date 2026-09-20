@@ -1770,3 +1770,265 @@ integration, including the `.xlsx` import path that exercises `multer`
 directly), typecheck clean, lint clean, `npm run build` clean. CLAUDE.md's
 "6 pre-existing moderate findings" note is now current again rather than
 stale.
+## ADR-041: E7 AWS deployment -- architecture, cost model, and least-privilege deviations
+
+Date: E7 (Phase 1 -- AWS Foundation)
+Status: ACCEPTED
+
+Context: E7 is the first real cloud deployment. E0-E6 ran entirely on local
+Docker with deployment topology explicitly deferred every phase (E4 ADR-029:
+"no registry push, no orchestration manifests, no HEALTHCHECK"; E5 ADR-032
+productionised config but not a live target). The target is a single-tenant-
+of-record staging deployment on synthetic data only -- no real employee data,
+no pilot customers (that is E8) -- so the design optimises for lowest cost
+and fewest moving parts over HA.
+
+### Region: eu-west-1 (Ireland)
+
+me-central-1 (UAE) and me-south-1 (Bahrain) -- the natural homes for a
+UAE-market product and where the data would ultimately need to live for
+residency -- are unavailable this epoch due to regional disruption. eu-west-1
+is the interim target. Nothing in the deployment is region-pinned beyond
+config: all resource names, the CloudFormation-free CLI scripts, and the
+Secrets Manager ARNs parameterise the region. Future migration path to
+me-central-1 (§ "Migration path" below) is a data-copy + DNS cutover, not a
+re-architecture.
+
+### AWS account plan: NEW Free Plan + credits, NOT the legacy 12-month Free Tier
+
+Account 218201720464 was created 2026-09-09 and is on the post-2025 AWS
+**Free Plan**: a $100 signup credit, hard-expiring ~2027-03-10 (182 days),
+with services billed at normal on-demand rates against that credit -- not the
+legacy "750 hrs/month of t2.micro + db.t3.micro for 12 months" allowance the
+E7 task prompt was written around. When the credit is exhausted or expires,
+a Free Plan account is suspended (resources stopped, then deleted after a
+grace period) unless upgraded to Paid; RDS deletion protection does not
+prevent this.
+
+Decision: proceed anyway, with eyes open and the numbers documented.
+Realistic run rate:
+
+| Resource | eu-west-1 on-demand | ~/month |
+| --- | --- | --- |
+| EC2 t3.micro (730 hrs) | $0.0114/hr | ~$8.30 (free-tier eligible -- see below) |
+| RDS db.t3.micro PostgreSQL, Single-AZ (730 hrs) | $0.018/hr | ~$13.10 |
+| RDS storage 20 GB gp2 | $0.115/GB-mo | ~$2.30 |
+| RDS backups (~20 GB beyond free) | $0.095/GB-mo | ~$1-2 |
+| EBS 30 GB gp2 (EC2 root) | $0.11/GB-mo | ~$3.30 |
+| Secrets Manager, 5 secrets | $0.40/secret-mo | ~$2.00 |
+| CloudWatch Logs ingest/store (7-day retention) | usage | ~$1-3 |
+| Data transfer out | usage | ~$1-3 |
+| **Total** | | **~$30-35/month** |
+
+=> the $100 credit funds roughly **3 months** of always-on operation, not 12.
+Mitigation: `aws rds stop-db-instance` + `aws ec2 stop-instances` when not
+actively testing (RDS auto-restarts after 7 days stopped; acceptable for
+staging). `E7_GATE.md` records `estimatedMonthlyCost: "~$30-35 (from $100
+signup credit)"` and `freeTierExpiryDate: "2027-03-10 (credit expiry)"`, and
+`knownLimitations` gains "runs on a $100 credit with a ~3-month always-on
+runway; account suspends when the credit is exhausted".
+
+### Compute: single EC2 t3.micro, not ECS/Fargate
+
+One t3.micro (2 vCPU, 1 GiB) runs, as Docker containers: apps/api,
+apps/worker, Redis (replaces ElastiCache), Keycloak 26.7.2 (self-hosted),
+behind Nginx (replaces an ALB). Rationale: ECS/Fargate task minimums and an
+ALB (~$16/month by itself) would more than double the run rate for zero
+staging benefit. The 1 GiB RAM ceiling is tight with Keycloak (JVM) + two
+Node processes + Redis; container memory limits in
+`infra/aws/docker-compose.prod.yml` (Keycloak 512m, api/worker/redis 256m
+each) sum to 1280m > 1 GiB, so a 2 GB swapfile is provisioned in the
+bootstrap script. If the JVM proves unschedulable we upgrade to t3.small
+(2 GiB, also free-tier eligible on this account) rather than
+re-architecting -- documented as a known risk, not a blocker.
+
+**Deviation, 2026-09-10:** the ADR originally specified `t2.micro` (the
+legacy 12-month Free Tier instance). `t2.micro` is **not** free-tier
+eligible on this post-2025 Free Plan account -- `run-instances` was
+rejected. `aws ec2 describe-instance-types --filters
+Name=free-tier-eligible,Values=true` in eu-west-1 returns: `t3.micro`,
+`t3.small`, `t4g.micro`, `t4g.small` (arm64), `c7i-flex.large`,
+`m7i-flex.large`. The AL2023 AMI in use is x86_64, so the t4g (Graviton)
+options are out without a rebuild. `t3.micro` is the 1:1 replacement for
+`t2.micro` -- identical 1 GiB RAM, current-gen Nitro, 2 vCPU instead of 1
+-- so the swap mitigation and the t3.small upgrade path above are both
+unchanged. AMI also bumped to `ami-0b3ba1acb76a70451`
+(`al2023-ami-2023.12.20260909.0-kernel-6.18-x86_64`).
+
+Keycloak is NOT moved to a managed IdP (Cognito): the entire auth test suite
+(ADR-004..008), the realm export, and jwt.strategy.ts's issuer pinning are
+Keycloak-specific. Productionising the IdP is its own concern, consistent
+with E5 Pillar 2 excluding Keycloak from docker-compose.production.yml.
+
+### Networking: default VPC, two security groups
+
+No custom VPC (ADR follows the task prompt): the default VPC
+`vpc-0e33cd6ddb35e6748` (172.31.0.0/16, eu-west-1) with its three public
+subnets (1a/1b/1c) is used as-is. RDS gets `--no-publicly-accessible` so it
+receives no public IP despite sitting in a public subnet; reachability is
+governed entirely by the security group.
+
+AWS rejects security-group names matching `sg-*`, so the two groups are
+named `compliance-app-sg` / `compliance-rds-sg` (the prompt's logical names
+"sg-app"/"sg-rds" are carried as the `Name` tag).
+
+| Group | Id | Ingress | Egress |
+| --- | --- | --- | --- |
+| compliance-app-sg | sg-02d0a10340ecf1da6 | 22/tcp from 217.165.199.47/32 (operator); 80,443/tcp from 0.0.0.0/0 | allow all (default) |
+| compliance-rds-sg | sg-0182cee63337b13fb | 5432/tcp from compliance-app-sg | none (default egress revoked) |
+
+Rationale: SSH is never open to 0.0.0.0/0 -- only the operator's current
+public IP. That IP is residential/dynamic and WILL change; when SSH starts
+timing out, `aws ec2 authorize-security-group-ingress`/`revoke-...` swaps the
+/32 (documented in `docs/runbooks/deploy.md`). RDS accepts connections only
+from the app group (never a CIDR, never public) and makes no outbound
+connections, so its egress is stripped entirely.
+
+### TLS: Let's Encrypt via certbot on Nginx, not ACM
+
+ACM certificates can only terminate on an ALB/CloudFront/API Gateway, none
+of which this topology has, and the `compliance-deploy` IAM principal has no
+`acm:*` permission anyway. certbot with the webroot/standalone HTTP-01
+challenge issues directly to the Nginx host, renews via cron/systemd timer,
+and costs nothing. Trade-off: 90-day certs and renewal is now a host
+responsibility (monitored via the deploy runbook), versus ACM's automatic
+renewal.
+
+### DNS: Hostinger, not Route 53
+
+The domain `compliance.ai-english-os.online` is registered and its zone is
+managed at Hostinger. A single A record `compliance -> 3.251.22.171` (the
+Phase 2 Elastic IP, `eipalloc-08ee5ed802f1048d4`) is added manually there
+once the instance exists. Route 53 is not used (and
+`compliance-deploy` has no `route53:*` permission); the prompt's "$0.50/month
+hosted zone" line is dropped. `KC_HOSTNAME` is pinned to the bare hostname
+`compliance.ai-english-os.online` (ADR-003/ADR-008 -- the issuer must be a
+fixed configured value, never request-derived); `KEYCLOAK_ISSUER` is built
+from it as `https://${KC_HOSTNAME}/realms/e0-test`. **Correction, Phase 3:**
+this line originally read `.../auth` -- Keycloak 26 (Quarkus) drops the
+legacy `/auth` context path by default, and jwt.strategy.ts's issuer
+validation was built against the path-less form (see
+`docker-compose.prod.yml`'s own note and Sub-phase B's passing realm
+probe against `/realms/e0-test`, no `/auth` prefix). An Elastic IP is
+allocated and associated so the A record survives instance stop/start.
+
+### IAM: least privilege, deviating from the prompt's managed-policy names
+
+`compliance-deploy` (the CLI principal, access key in the operator's
+`~/.aws/credentials`) is not root and has no IAM/Route53/ACM permissions. It
+can reach EC2, RDS, S3, Secrets Manager, ECR. Therefore:
+
+- `ec2-app-role` (the EC2 instance role + instance profile) is created
+  **manually by the operator from an admin console session**, not by this
+  tooling. Its permissions are scoped inline policies, NOT the prompt's
+  `SecretsManagerReadWrite` / `CloudWatchLogsFullAccess` /
+  `AmazonS3FullAccess`:
+  * secretsmanager: `GetSecretValue`+`DescribeSecret` on
+    `arn:aws:secretsmanager:eu-west-1:218201720464:secret:compliance/prod/*`
+    only (no leading slash -- the secrets were created as `compliance/prod/*`;
+    a `/compliance/prod/*` pattern would not match their ARNs), plus
+    `kms:Decrypt` gated by
+    `kms:ViaService = secretsmanager.eu-west-1.amazonaws.com`. Read-only:
+    the instance never writes a secret (the RDS-endpoint write-back is done
+    once by the operator/deploy step, not the app).
+  * logs: `CreateLogGroup`/`CreateLogStream`/`PutLogEvents`/
+    `DescribeLogStreams` on `arn:aws:logs:eu-west-1:218201720464:log-group:/compliance/*`
+    only (for the Docker `awslogs` driver, §6.4).
+  * s3: `PutObject`/`GetObject`/`ListBucket`/`DeleteObject` on the single
+    bucket `compliance-prod-backups-218201720464` and its objects -- nothing
+    else.
+  * ecr: `GetAuthorizationToken` (must be `Resource: *`) plus
+    `BatchGetImage`/`GetDownloadUrlForLayer`/`BatchCheckLayerAvailability`
+    scoped to the `compliance-api` and `compliance-worker` repo ARNs. This
+    is absent from the prompt's §3.1 list but required by §6.1 (the instance
+    pulls images from ECR) -- a prompt gap, filled here.
+- The prompt's separate `ecs-deploy` deployment user is redundant:
+  `compliance-deploy` already exists with exactly the service reach the
+  deploy pipeline needs. Not created.
+
+### Secrets Manager structure
+
+Five secrets, all `SecretString` JSON, all encrypted with the AWS-managed
+key `aws/secretsmanager`. Names carry **no leading slash** (`compliance/prod/*`,
+not `/compliance/prod/*`) -- the IAM resource pattern above is aligned to this:
+
+| Name | Keys |
+| --- | --- |
+| compliance/prod/database | DB_HOST, DB_PORT, DB_NAME, DB_APP_USER, DB_APP_PASSWORD, DB_MIGRATION_USER, DB_MIGRATION_PASSWORD, DB_MASTER_USER, DB_MASTER_PASSWORD |
+| compliance/prod/redis | REDIS_HOST(=redis), REDIS_PORT(=6379), REDIS_PASSWORD |
+| compliance/prod/keycloak | KC_HOSTNAME, KC_DB_PASSWORD, KC_ADMIN_PASSWORD |
+| compliance/prod/smtp | SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS |
+| compliance/prod/app | NODE_ENV(=production), PORT(=3000) |
+
+All passwords generated with `openssl rand -hex 20` (40 hex chars: no `/`,
+`@`, `"`, or space -- safe for both an RDS master password and a libpq
+connection string). Zero secret values live in git, the compose file, or the
+bootstrap script; the instance resolves them at boot via the role. Secret
+ARNs are recorded in `docs/e7-results/phase-1-aws-foundation.md`.
+
+### RDS: PostgreSQL 18.4, db.t3.micro, Single-AZ, private
+
+- Engine `postgres` 18.4 -- matches the local dev container (`postgres:18.4`)
+  that all migrations and the 179-test suite were validated against;
+  auto-minor-version-upgrade left ON (RDS will move it toward 18.6+).
+- `db.t3.micro`, 20 GB `gp2` (not gp3 -- the prompt pins gp2), Single-AZ, not
+  publicly accessible, `compliance-rds-sg`, DB name `compliance_db`,
+  master user `compliance_master` (avoids RDS-reserved names),
+  **storage encrypted at rest** (`aws/rds` KMS key, no extra cost; immutable
+  post-creation, so set now -- a security-first compliance store), 7-day
+  automated backups, **deletion protection ENABLED**.
+- **Deviation, 2026-09-10:** the account is on the AWS Free Plan, which
+  rejects `--backup-retention-period 7` (`FreeTierRestrictionError`). Created
+  with `--backup-retention-period 1` instead. Retention is mutable
+  post-creation, so `aws rds modify-db-instance --db-instance-identifier
+  compliance-db --backup-retention-period 7 --apply-immediately` restores the
+  intended value once the account is upgraded off the Free Plan. Tracked in
+  `docs/e7-results/phase-1-aws-foundation.md` §5.
+- A second logical database `keycloak_db` is created inside the same
+  instance (post-provision `CREATE DATABASE`) for Keycloak's own store --
+  cheaper than a second RDS instance and isolated by database + role.
+- **Deviation, 2026-09-10:** the app database is **`e0db`**, not
+  `compliance_db`. The RDS instance was created with `--db-name
+  compliance_db`, but every `.env.production.example` URL and
+  `001_roles.sql`'s `GRANT CONNECT ON DATABASE e0db` hard-code `e0db`, and
+  ADR-038 wants "the reviewed migration set applied unchanged". So `e0db`
+  is created on the instance and used; the empty auto-created
+  `compliance_db` is left in place (harmless). Phase 2 §6 in
+  `docs/e7-results/phase-2-ec2-host.md`.
+- Post-provision verification (mirrors the E6 backup/restore integrity
+  check): `SELECT version()` is PostgreSQL 18; the `001..00N` SQL migrations
+  applied as `migration_user` recreate `app_user`/`migration_user` with the
+  exact GRANT/REVOKE set (app_user: SELECT+INSERT only on `audit_events`,
+  no UPDATE/DELETE); FORCE RLS + the NULLIF guard + every
+  `tenant_isolation_*` policy present on `employees`, `documents`,
+  `idempotency_keys`, `audit_events`, `expiry_policies`.
+
+Known gap carried from E5: `infra/postgres/migrate.js` has no
+`schema_migrations` tracking -- it bootstraps a fresh database, it does not
+apply migrations incrementally. For E7 the RDS database is bootstrapped once
+from empty, so this is not yet a blocker, but it MUST be resolved before E8
+(any schema change against a live database). Tracked as the top E7-exit
+backlog item. **Resolved, post-E7:** see ADR-038, merged into `main` and
+deployed live the same day this branch merged -- `migrate.js` now tracks
+applied migrations in `schema_migrations` and backfills this exact
+already-bootstrapped RDS database as already-applied on its first run,
+without re-running any of the ten migration files.
+
+### Migration path to me-central-1 (when it recovers)
+
+1. Stand up the same two SGs + RDS + EC2 in me-central-1 from the same
+   scripts (region is a parameter).
+2. `pg_dump` from eu-west-1 RDS, `pg_restore` into me-central-1 RDS (the E6
+   `docs/runbooks/backup-restore.md` drill, already proven to preserve RLS +
+   FORCE RLS + the append-only grant).
+3. Re-point the Hostinger A record; re-issue the cert via certbot on the new
+   host; update `KC_HOSTNAME` only if the domain changes (it need not).
+4. Decommission eu-west-1.
+No application code, RLS, or schema change is involved.
+
+Consequences: Phase 1 creates two security groups (free), one RDS instance
+(~$15-17/month), five Secrets Manager secrets (~$2/month), and depends on
+the operator creating `ec2-app-role` out of band. No CLAUDE.md Review Gate is
+tripped by the infrastructure itself; the RDS migration run is the existing
+reviewed migration set applied unchanged, not a new migration. This ADR is
+written before the RDS instance is created, per the E7 quality gate.
