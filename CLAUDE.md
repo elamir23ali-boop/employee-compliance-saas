@@ -262,12 +262,13 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   with a mocked Drizzle handle), `npm run test:security`, `npm run test:integration`
   (both HTTP-driven: require `docker compose up` — Postgres+Redis+Keycloak —
   plus the API (`apps/api`) and worker (`apps/worker`) processes running locally)
-- Current state: 179/179 passing (91 unit / 52 security / 36 integration)
+- Current state: 183/183 passing (95 unit / 52 security / 36 integration)
   — the unit count rose 71 → 90 with the ADR-033 calendar-days assertions
   (commit `1c309b7`, pre-E6); E6 added no tests (validation-only); 90 → 91
   with ADR-037's `pool.on('error')` listener-registration test, a
   pre-existing drift this line hadn't caught up to until ADR-039 measured
-  it fresh
+  it fresh; 91 → 95 with ADR-038's `planMigrations()` coverage
+  (`tests/unit/migrate-plan.test.ts`)
 - **CI gap (ADR-023) addressed in E3 Pillar 1 (ADR-024), pending live verification:**
   `.github/workflows/ci.yml`'s `integration` job now runs `docker compose`
   (Postgres+Redis+Keycloak) directly on the runner — not GitHub Actions

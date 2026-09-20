@@ -5,14 +5,14 @@ Scope: `apps/api` + `apps/worker`, via `infra/docker/docker-compose.production.y
 see its own top-of-file comment and ADR-032's neighbor context in
 `docs/architecture/decisions.md`) or any AWS/orchestration topology (E6).
 
-> **A known gap this runbook does not paper over**: `infra/postgres/migrate.js`
-> was built to bootstrap a *fresh* database (CI, or a first-ever production
-> deploy) by running every file in `packages/database/migrations/*.sql` in
-> order, unconditionally. It has no "already applied" tracking (no
-> `schema_migrations`-style table exists in this schema). Re-running it
-> against a database that already has migrations 001-010 applied will fail
-> on the first already-existing object. **Step 3 below reflects that
-> reality** -- a first deploy differs from every deploy after it.
+> **Fixed (ADR-039)**: `infra/postgres/migrate.js` now tracks applied
+> migrations in a `schema_migrations` table and is safe to re-run on every
+> deploy -- it only ever applies files it hasn't recorded yet. A database
+> already migrated by the old, untracked version of this script (this
+> repo's own E7 production RDS, at the time ADR-039 was written) is handled
+> automatically: the first run against it detects the pre-existing schema
+> and backfills every file on disk as already-applied, without re-running
+> any of them. **Step 3 below is now the same command on every deploy.**
 
 ## 1. Pre-deploy checklist
 
@@ -41,32 +41,33 @@ replace this step with a `pull`.)
 
 ## 3. Run migrations
 
-**First-ever deploy to a fresh database** (no prior migrations applied):
+**Every deploy, first or subsequent** -- the same command:
 
 ```
 DATABASE_ADMIN_URL=<superuser connection string> node infra/postgres/migrate.js
 ```
 
-This applies every file in `packages/database/migrations/` in order, as the
-Postgres superuser -- the SQL files themselves `SET ROLE migration_user`
-for the statements that create/own objects (ADR-002); `migrate.js` never
-uses `app_user` or `migration_user` as its own connecting credential
-(CLAUDE.md: "NEVER use migration_user in application runtime code" --
-this is tooling, and it deliberately doesn't use it either, since
-`migration_user` lacks `CREATEROLE` and `001_roles.sql` is what creates
-both roles in the first place).
+This applies every file in `packages/database/migrations/` not yet recorded
+in `schema_migrations`, in order, as the Postgres superuser -- the SQL
+files themselves `SET ROLE migration_user` for the statements that
+create/own objects (ADR-002); `migrate.js` never uses `app_user` or
+`migration_user` as its own connecting credential (CLAUDE.md: "NEVER use
+migration_user in application runtime code" -- this is tooling, and it
+deliberately doesn't use it either, since `migration_user` lacks
+`CREATEROLE` and `001_roles.sql` is what creates both roles in the first
+place). Each file is applied inside its own transaction, alongside the
+`schema_migrations` row that records it -- a failure partway through a
+file rolls back both together, so a retry never sees that file as
+half-applied-and-tracked or applied-but-untracked.
 
-**Every subsequent deploy that adds a new migration file** (the common
-case): `migrate.js` cannot be re-run as-is (see the gap noted above). Apply
-only the new file(s) by hand, in order, as the superuser:
+**Verify the migration applied** -- query `schema_migrations` directly:
 
+```sql
+SELECT filename, applied_at, backfilled FROM schema_migrations ORDER BY filename;
 ```
-psql "<DATABASE_ADMIN_URL>" -f packages/database/migrations/0NN_the_new_one.sql
-```
 
-**Verify the migration applied** -- there is no tracking table to query;
-verify by inspecting the resulting schema directly for whatever that
-migration actually added, e.g.:
+or inspect the resulting schema directly for whatever that migration
+actually added, e.g.:
 
 ```sql
 -- new table

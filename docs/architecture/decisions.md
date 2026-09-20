@@ -1567,6 +1567,86 @@ chaos scenarios (R1/R6: `docker restart` on Postgres, `pg_terminate_backend`
 on an idle connection) against a running stack to confirm the process now
 survives is recommended before E7 but is out of scope for this PR.
 
+## ADR-038: `schema_migrations` tracking in `infra/postgres/migrate.js`
+
+Date: post-E7 (standalone fix, pre-pilot-onboarding)
+
+Status: ACCEPTED
+
+Context: `infra/postgres/migrate.js` was built in E1 to bootstrap a *fresh*
+database (CI, or a first-ever deploy) by re-running every file in
+`packages/database/migrations/*.sql`, unconditionally, on every invocation.
+This was documented as a known gap from E5 onward
+(`docs/runbooks/deploy.md`'s "known gap" note, `E5_GATE.md`/`E6_GATE.md`'s
+`knownLimitations`, `E7_GATE.md`'s carried-forward backlog): re-running it
+against a database that already has migrations applied fails on the first
+already-existing object (`CREATE ROLE app_user` when the role already
+exists, etc). This repo's own E7 production RDS is in exactly that state --
+bootstrapped once from empty by the untracked script, ten migration files
+applied, zero tracking of which. Flagged repeatedly as the top blocker
+before any future migration could be applied against it, and explicitly
+called out as one of the two highest-priority items to fix before any
+pilot customer onboarding.
+
+This is squarely "any database migration" territory per CLAUDE.md's Review
+Gates -- both the new `schema_migrations` table itself and the changed
+apply logic that decides what runs against a live database. Reviewed
+before implementation, per that gate.
+
+Decision: `migrate.js` creates `schema_migrations (filename TEXT PRIMARY
+KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now(), backfilled BOOLEAN NOT
+NULL DEFAULT false)` if it doesn't exist (idempotent, safe on every run),
+then decides what to do with each file in `packages/database/migrations/`
+via a pure function, `planMigrations()` (no I/O, unit-tested directly --
+`tests/unit/migrate-plan.test.ts`, MIGRATE-01..04):
+
+- **Fresh database** (nothing tracked, and `tenants` -- the earliest
+  non-role table, created by `002_schema.sql` -- doesn't exist either):
+  apply every file, recording each as it succeeds. Unchanged behavior for
+  CI and any genuinely first deploy.
+- **Pre-existing, untracked database** (nothing tracked, but `tenants`
+  already exists -- this repo's E7 production RDS today): every file on
+  disk was already applied together, before tracking existed. Backfill all
+  of them into `schema_migrations` (`backfilled = true`, no SQL
+  re-executed), so the very next run only ever sees genuinely new files.
+  This one-time backfill is exactly what makes `migrate.js` safe to run
+  against the live production database without risk of re-running
+  001-010's effects.
+- **Anything already tracked**: apply only the files not yet recorded, in
+  the same sorted order as always. Each file's SQL execution and its
+  `schema_migrations` insert happen inside one transaction (`BEGIN` ...
+  `COMMIT`, `ROLLBACK` on failure) -- a failure partway through a file
+  rolls back both together, so a retry never finds a file half-applied and
+  tracked, or applied and untracked.
+
+Why a real column-marker check (`to_regclass('public.tenants')`) rather
+than, say, a version file or an environment flag: it needs zero new
+configuration or operator input, works identically whether this runs
+against CI's always-fresh container or the one specific already-migrated
+production database this fix exists for, and can't drift from the actual
+database state the way a manually-maintained flag could.
+
+What is NOT changed: no rollback mechanism (still a manual procedure, see
+`docs/runbooks/rollback-migration.md`, now updated to delete the
+corresponding `schema_migrations` row alongside any manual rollback so a
+future run doesn't skip a migration that was actually reverted); no
+migration-file format change (still plain `.sql`, no per-migration
+metadata beyond the filename); no change to any RLS policy, auth/JWT
+logic, or tenant isolation code -- this is purely the bootstrap tool's own
+bookkeeping.
+
+Consequences: `infra/postgres/migrate.js` can now be run identically on
+every deploy, first or the hundredth -- `docs/runbooks/deploy.md` step 3
+collapses to one command instead of two different procedures depending on
+whether this is a first deploy. The first run against the live E7
+production RDS will backfill all ten existing files rather than attempt to
+re-run them. Verified via `tests/unit/migrate-plan.test.ts` (4 cases: fresh
+DB, pre-existing untracked DB, incremental new-file case, fully-up-to-date
+no-op) plus a full regression run (183/183: 95 unit / 52 security / 36
+integration). Not yet re-verified live against the actual production RDS
+in this PR -- that happens as part of running this updated script there,
+per the deploy runbook, whenever the next real migration needs to ship.
+
 ## ADR-039: `app.set('trust proxy', 1)` -- real client IP in `audit_events`
 
 Date: post-E7 (standalone fix, pre-pilot-onboarding)
@@ -1617,7 +1697,7 @@ local Docker stack, with no Nginx-equivalent proxy in front of it to
 exercise `X-Forwarded-For` trust). Verification is a live check after
 redeploy: make one authenticated request through the real Nginx, then
 confirm the resulting `audit_events` row's `actor_ip` is the real caller's
-address, not a `172.x`/container address. Full regression run (179/179: 91
+address, not a `172.x`/container address. Full regression run (183/183: 95
 unit / 52 security / 36 integration, typecheck/lint clean) confirms no
 existing behavior regressed. This is the second of the two items flagged in
 `E7_GATE.md` as blocking pilot onboarding, alongside ADR-038's migration
