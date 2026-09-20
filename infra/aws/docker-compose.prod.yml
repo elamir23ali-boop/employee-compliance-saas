@@ -1,0 +1,221 @@
+## E7 Phase 3 -- production application stack for the compliance-app EC2 host.
+##
+## Distinct from infra/docker/docker-compose.production.yml (E5 Pillar 2):
+## that file builds api/worker locally and deliberately excludes Keycloak
+## ("productionising an identity provider is a distinct concern"). This one
+## is the real answer to that deferral -- it pulls pre-built images from
+## ECR (built + pushed from a dev machine, never built on this 1 GiB host)
+## and adds Keycloak 26.7.2 pointed at the real `keycloak_db` on RDS
+## instead of dev's ephemeral embedded database. See ADR-041 (E7 Phase 3
+## section) and docs/e7-results/phase-3-app-deployment.md.
+##
+## No `postgres` service -- RDS is the database (E7 Phase 1/2). No `nginx`
+## service yet -- added in Sub-phase C once the Hostinger DNS A record is
+## confirmed live and a real TLS cert can be issued.
+##
+## Secrets: every value below is `${VAR}` interpolation from a gitignored
+## .env.prod, rendered on the host from the 5 `compliance/prod/*` Secrets
+## Manager secrets via the instance role (infra/aws/deploy-stack.sh) --
+## never typed or committed (CLAUDE.md: "NEVER hardcode secrets in source
+## files").
+##
+## No per-container cpus/memory limits (deploy.resources.limits) -- this
+## host's kernel/cgroup v2 setup rejects docker compose's memory limits
+## ("cannot enter cgroupv2 with domain controllers -- invalid state").
+## Containers run unconstrained by an explicit ceiling; the only memory
+## backstop is the 2 GB swapfile infra/aws/bootstrap.sh already
+## provisions. If Keycloak's JVM crowds out the other three under load,
+## ADR-041's own escape hatch is a t3.small upgrade (also free-tier
+## eligible on this account), not resurrecting cgroup limits this kernel
+## can't apply.
+##
+## Usage: docker compose -f infra/aws/docker-compose.prod.yml
+##   --env-file .env.prod up -d
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a ${REDIS_PASSWORD} ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/redis
+        awslogs-create-group: 'true'
+        # `tag`, not `awslogs-stream-prefix` -- that option name is ECS task
+        # definitions' logConfiguration field, not a valid opt for Docker
+        # Engine's native awslogs driver (docker up rejected it: "unknown
+        # log opt 'awslogs-stream-prefix'"). `tag` is the real per-stream
+        # naming knob this driver supports.
+        tag: 'compliance-redis'
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.2
+    # `start`, not dev compose's `start-dev` (infra/docker/docker-compose.yml)
+    # -- ADR-041's own dev/prod distinction for the identity provider.
+    command: start --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      # Real host now (unlike dev's KC_HOSTNAME_STRICT: 'false' localhost
+      # convenience) -- no `/auth` path: Keycloak 26 (Quarkus) drops the
+      # legacy context path by default, and this matches what
+      # jwt.strategy.ts / KEYCLOAK_ISSUER below actually validate against
+      # (see the plan's ADR-041 correction note).
+      KC_HOSTNAME: ${KC_HOSTNAME}
+      KC_HOSTNAME_STRICT: 'true'
+      # Nginx (Sub-phase C) terminates TLS; Keycloak speaks plain HTTP
+      # behind it and trusts X-Forwarded-* for correct external URLs.
+      KC_HTTP_ENABLED: 'true'
+      KC_PROXY_HEADERS: xforwarded
+      # Unlike dev (embedded H2, ephemeral) -- the real keycloak_db
+      # database + keycloak role created by rds-bootstrap.sh (E7 Phase 2 §6).
+      KC_DB: postgres
+      KC_DB_URL_HOST: ${DB_HOST}
+      KC_DB_URL_PORT: '5432'
+      KC_DB_URL_DATABASE: keycloak_db
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+    volumes:
+      # Absolute host path, not a repo-relative one -- this compose file
+      # runs from /opt/compliance on the EC2 host, which has no repo
+      # checkout (infra/aws/deploy-stack.sh ships the same
+      # infra/docker/keycloak/realm-export.json content there directly).
+      - /opt/compliance/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    # 127.0.0.1-only, same reasoning as api's binding below: Sub-phase C
+    # hasn't added Nginx/TLS yet, so nothing here should be reachable from
+    # the internet even though compliance-app-sg already allows 80/443
+    # from 0.0.0.0/0. Without this, Keycloak's own healthcheck still
+    # passes (it runs *inside* the container against 127.0.0.1:8080, so
+    # api/worker's `depends_on: condition: service_healthy` is satisfied
+    # either way) but nothing is listening on the host's port 8080 --
+    # deploy-stack.sh's own verification curl (and any operator's manual
+    # check) gets connection-refused (000), not a real HTTP response.
+    ports:
+      - '127.0.0.1:8080:8080'
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/e0-test HTTP/1.1\r\nhost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -q '200\\|302' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/keycloak
+        awslogs-create-group: 'true'
+        tag: 'compliance-keycloak'
+
+  api:
+    image: ${ECR_REGISTRY}/compliance-api:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: ${PORT}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL}
+      REDIS_URL: ${REDIS_URL}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER}
+      KEYCLOAK_JWKS_URI: ${KEYCLOAK_JWKS_URI}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+    # No host port published to the internet in Sub-phase B -- reachable
+    # only from inside the host (SSM-session smoke test) until Sub-phase C
+    # adds Nginx. 127.0.0.1-only bind keeps this true even though
+    # compliance-app-sg already allows 80/443 from 0.0.0.0/0.
+    ports:
+      - '127.0.0.1:3000:3000'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://localhost:3000/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/api
+        awslogs-create-group: 'true'
+        tag: 'compliance-api'
+
+  worker:
+    image: ${ECR_REGISTRY}/compliance-worker:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM_DEFAULT: ${SMTP_FROM_DEFAULT}
+    # No HEALTHCHECK -- same ADR-029 decision #7 as the E5 compose file:
+    # apps/worker exposes no HTTP endpoint; liveness is its structured
+    # worker_shutdown_*/reminder_scan_completed log lines and BullMQ state.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/worker
+        awslogs-create-group: 'true'
+        tag: 'compliance-worker'
+
+  # Sub-phase C -- the actual public edge. `api`/`keycloak` stay
+  # 127.0.0.1-only (above); this is the one service bound to 0.0.0.0,
+  # matching compliance-app-sg's existing 80/443-from-0.0.0.0/0 rule
+  # (open since Phase 1, unused until now). infra/aws/setup-tls.sh owns
+  # /opt/compliance/nginx.conf's content -- it starts this service with
+  # infra/aws/nginx/nginx.bootstrap.conf (ACME challenge only, no TLS)
+  # to issue the first cert via the standard chicken-and-egg two-step,
+  # then overwrites the same path with infra/aws/nginx/nginx.conf (the
+  # real TLS + proxy config) and restarts. Never rebuilt/re-pulled by
+  # deploy-stack.sh's own `up -d` -- that script only touches
+  # redis/keycloak/api/worker.
+  nginx:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - /opt/compliance/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /opt/compliance/certbot-webroot:/var/www/certbot:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    # No HEALTHCHECK: nothing depends_on nginx, and the bootstrap config
+    # deliberately answers `/` with 503 before a cert exists -- a
+    # healthcheck would misreport "unhealthy" during that expected window.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-west-1
+        awslogs-group: /compliance/nginx
+        awslogs-create-group: 'true'
+        tag: 'compliance-nginx'

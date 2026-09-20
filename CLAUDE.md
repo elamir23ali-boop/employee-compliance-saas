@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E6 complete — Production Simulation & Scale Validation (validation-only, no features/migrations: seed tooling → 10K baseline → 100K load → 300K/500K stress → failure & resilience + backup/restore → performance report + gate)
+## Current Phase: E7 complete — AWS Production Infrastructure (Staging Deployment), plus four post-E7 standalone fixes merged the same day (pool.on('error') resilience, migration tracking, trust-proxy/audit-IP, dependency CVE remediation)
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -179,6 +179,59 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   `docs/e6-results/E6_PERFORMANCE_REPORT.md`; `E6_GATE.md` records the
   final state; tagged `e6-complete`. Sustained-load capped at 300K (host
   RAM below the 8 GB floor all epoch); 1M deferred.
+- **E7 complete — AWS Production Infrastructure (Staging Deployment).**
+  First real cloud deployment, live at
+  `https://compliance.ai-english-os.online` (EC2 t3.micro
+  `i-0779afd8bafdedbc9`, RDS PostgreSQL 18.4 db.t3.micro Single-AZ, 5
+  Secrets Manager secrets, Nginx + Let's Encrypt TLS, Keycloak 26.7.2
+  self-hosted — no managed IdP). Region eu-west-1 (Ireland): the natural
+  me-central-1/me-south-1 UAE-region targets were unavailable this epoch
+  due to regional disruption (ADR-041 documents the migration path once
+  they recover). Account runs on AWS's post-2025 Free Plan ($100 signup
+  credit, ~3-month always-on runway at ~$30-35/month, not the legacy
+  12-month Free Tier the original plan assumed) — deviations (`t3.micro`
+  not `t2.micro`, backup retention 1 day not 7, DB name `e0db` not
+  `compliance_db`) are all recorded live in ADR-041 as they were hit. 300
+  synthetic employees / 704 documents seeded across the 5 E6 tenants
+  (`infra/aws/seed-smoke-data.sh`, reusing E6's seed tooling unchanged); a
+  full k6 smoke run against the real production URL passed 100% (60/60
+  checks, 0% failed, avg 207ms / p95 379ms). Five real,
+  previously-invisible bugs surfaced only by a genuine authenticated
+  request through the real public domain — none visible to automated
+  health checks alone: a `deploy-stack.sh` worker-log verification race, a
+  CRLF-vs-LF checksum-pinning mistake, a
+  `KEYCLOAK_ISSUER`/`KEYCLOAK_JWKS_URI` double-`https://` bug (every real
+  JWT validation 401'd), Nginx never routing `/auth/realms/*` to Keycloak,
+  and Nginx caching the `api` container's IP forever (every redeploy
+  502'd until a manual Nginx restart) — all fixed live, see
+  `E7_GATE.md`'s `bugsFoundAndFixedThisPhase`. ADR-041 records the full
+  architecture/cost/least-privilege ruling; `docs/e7-results/` has the
+  phase-by-phase detail. Tagged `e7-complete`.
+
+  Known gaps carried out of E7 (`E7_GATE.md`'s `knownLimitations`):
+  `DATABASE_URL` used `sslmode=no-verify` (encrypts without validating the
+  RDS CA chain — acceptable only because the path never leaves the VPC),
+  `audit_events.actorIp` recorded Nginx's own container IP not the real
+  caller's, `infra/postgres/migrate.js` had no incremental-migration
+  tracking, SMTP delivery was never live-tested against the real
+  `compliance/prod/smtp` provider, and the 5 O(n) read paths E6 flagged
+  were untouched (infrastructure standup, not application performance
+  work).
+
+  **All but two since resolved as standalone post-E7 fixes, merged into
+  `main` the same day this branch merged:** ADR-037 (`pool.on('error')`
+  resilience fix, landed just ahead of E7), ADR-038 (`schema_migrations`
+  tracking — the live RDS database backfills its ten already-applied
+  migrations as already-tracked on first run, no re-execution), ADR-039
+  (`app.set('trust proxy', 1)` — `audit_events.actorIp` now records the
+  real client IP, live-verified against production: a real request from a
+  known external IP produced an `audit_events` row with that exact IP,
+  not a container address), and ADR-040 (4 newly-surfaced HIGH `npm
+  audit` findings — multer/nodemailer/js-yaml — remediated). Both
+  `compliance-api` and `compliance-worker` images were rebuilt from
+  `main` and redeployed to the live EC2 host to take effect. Still open:
+  a live SMTP delivery test against the real provider, and all 5 of E6's
+  O(n) read-path findings.
 
 ## ABSOLUTE PROHIBITIONS
 
