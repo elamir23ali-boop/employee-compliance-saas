@@ -55,7 +55,7 @@
     "liveSmokeTest": "PASS -- see smokeTest above, the actual new verification this epoch performed"
   },
   "adrsAdded": [],
-  "adrNote": "ADR-038 (E7 AWS deployment architecture, cost model, least-privilege deviations) was written in Phase 1, before this phase; no new ADR this phase -- all fixes here are script/config bugs, not architecture decisions.",
+  "adrNote": "ADR-041 (E7 AWS deployment architecture, cost model, least-privilege deviations) was written in Phase 1, before this phase; no new ADR this phase -- all fixes here are script/config bugs, not architecture decisions.",
   "artifacts": {
     "infraScripts": "infra/aws/{bootstrap,rds-preflight,deploy-stack,setup-tls,deploy-full,seed-smoke-data}.sh, infra/aws/docker-compose.prod.yml, infra/aws/nginx/{nginx.bootstrap,nginx}.conf",
     "results": [
@@ -65,8 +65,8 @@
     ]
   },
   "knownLimitations": [
-    "Single EC2 t3.micro, no HA/multi-AZ, Single-AZ RDS -- deliberate cost tradeoff for a staging deployment on synthetic data only (ADR-038)",
-    "AWS account is on the Free Plan with a $100 signup credit expiring 2027-03-10 (~3 months of always-on runway at ~$30-35/month) -- see ADR-038",
+    "Single EC2 t3.micro, no HA/multi-AZ, Single-AZ RDS -- deliberate cost tradeoff for a staging deployment on synthetic data only (ADR-041)",
+    "AWS account is on the Free Plan with a $100 signup credit expiring 2027-03-10 (~3 months of always-on runway at ~$30-35/month) -- see ADR-041",
     "DATABASE_URL/DATABASE_MIGRATION_URL use sslmode=no-verify (encrypts, doesn't validate the RDS CA chain) -- acceptable only because the path never leaves the VPC; full chain validation needs an image rebuild, documented gap",
     "apps/api/src/common/audit-context.ts's actorIp/trust-proxy gap is unfixed -- audit_events.actorIp records nginx's own container IP, not the real client IP, for every row since Sub-phase C went live; needs an image rebuild + ECR push, deliberately not bundled into this epoch's pure-config work",
     "infra/postgres/migrate.js still has no schema_migrations tracking (carried from E5) -- not yet a blocker since RDS was bootstrapped once from empty, but MUST be resolved before any future migration is applied against this live database",

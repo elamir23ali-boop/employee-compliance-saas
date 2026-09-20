@@ -144,7 +144,7 @@ echo
 echo "=== [4/7] render .env.prod ==="
 # DB_NAME deliberately hardcoded to e0db, NOT read from the DB_NAME key in
 # compliance/prod/database -- the RDS instance itself was created with
-# --db-name compliance_db (ADR-038's own recorded deviation), and e0db is
+# --db-name compliance_db (ADR-041's own recorded deviation), and e0db is
 # the database rds-bootstrap.sh actually created and migrated. Trusting an
 # unread secret field here risks silently pointing prod at the empty,
 # unmigrated compliance_db.

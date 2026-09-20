@@ -1,7 +1,7 @@
 # E7 Phase 2 -- EC2 app host (command log)
 
 Region **eu-west-1** · Account **218201720464** · Principal
-`iam::218201720464:user/compliance-deploy`. See **ADR-038** for rationale.
+`iam::218201720464:user/compliance-deploy`. See **ADR-041** for rationale.
 
 Phase 1 (`phase-1-aws-foundation.md`) left the RDS bootstrap (DB_HOST
 write-back, `keycloak_db`, `001..00N` migrations + RLS verification)
@@ -46,7 +46,7 @@ not in AL2023 repos). The application stack is deployed in a later phase.
 
 ## 4a. Instance-type selection
 
-`t2.micro` (ADR-038's original, the legacy 12-month Free Tier instance) is
+`t2.micro` (ADR-041's original, the legacy 12-month Free Tier instance) is
 **not** free-tier eligible on this post-2025 Free Plan account --
 `run-instances` was rejected. Free-tier-eligible types in eu-west-1:
 
@@ -65,12 +65,12 @@ Chosen: **`t3.micro`** -- the 1:1 x86_64 replacement for `t2.micro`
 (identical 1 GiB RAM; 2 vCPU; current-gen Nitro). The AL2023 AMI is
 x86_64, so the arm64 `t4g.*` options would need an image rebuild. The 2 GB
 swap in `bootstrap.sh` and the "upgrade to t3.small if the JVM won't
-schedule" path (ADR-038) are both unchanged -- and t3.small is itself
+schedule" path (ADR-041) are both unchanged -- and t3.small is itself
 free-tier eligible here.
 
 ## 4b. Launch  (run from operator CloudShell)
 
-`compliance-deploy` has no `iam:PassRole` on `role/ec2-app-role` (ADR-038
+`compliance-deploy` has no `iam:PassRole` on `role/ec2-app-role` (ADR-041
 gave it no IAM perms), so `run-instances` with `--iam-instance-profile`
 fails `UnauthorizedOperation` from the automation principal. Rather than
 widen `compliance-deploy`, the launch is run once from the operator's
@@ -160,9 +160,9 @@ survives instance stop/start, so the record is set once.
 
 - **DB name `e0db`** -- the repo (all three `.env.production.example` URLs,
   `001_roles.sql`'s `GRANT CONNECT ON DATABASE e0db`) standardises on `e0db`.
-  Migrations apply **unchanged** (ADR-038's stated intent). `CREATE DATABASE
+  Migrations apply **unchanged** (ADR-041's stated intent). `CREATE DATABASE
   e0db` on the instance; the auto-created `compliance_db` stays empty/unused
-  (cosmetic -- ADR-038 §RDS updated to say the live DB is `e0db`).
+  (cosmetic -- ADR-041 §RDS updated to say the live DB is `e0db`).
 - **Skip `004_seed_dev.sql`** -- apply `001-003` + `005-010` only. No E0
   fixture rows. `008`'s "default policy per seeded tenant" INSERT..SELECT
   then simply inserts 0 rows (no error). Synthetic data, if needed later,

@@ -6,7 +6,7 @@
 ## is the real answer to that deferral -- it pulls pre-built images from
 ## ECR (built + pushed from a dev machine, never built on this 1 GiB host)
 ## and adds Keycloak 26.7.2 pointed at the real `keycloak_db` on RDS
-## instead of dev's ephemeral embedded database. See ADR-038 (E7 Phase 3
+## instead of dev's ephemeral embedded database. See ADR-041 (E7 Phase 3
 ## section) and docs/e7-results/phase-3-app-deployment.md.
 ##
 ## No `postgres` service -- RDS is the database (E7 Phase 1/2). No `nginx`
@@ -25,7 +25,7 @@
 ## Containers run unconstrained by an explicit ceiling; the only memory
 ## backstop is the 2 GB swapfile infra/aws/bootstrap.sh already
 ## provisions. If Keycloak's JVM crowds out the other three under load,
-## ADR-038's own escape hatch is a t3.small upgrade (also free-tier
+## ADR-041's own escape hatch is a t3.small upgrade (also free-tier
 ## eligible on this account), not resurrecting cgroup limits this kernel
 ## can't apply.
 ##
@@ -58,7 +58,7 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.2
     # `start`, not dev compose's `start-dev` (infra/docker/docker-compose.yml)
-    # -- ADR-038's own dev/prod distinction for the identity provider.
+    # -- ADR-041's own dev/prod distinction for the identity provider.
     command: start --import-realm
     environment:
       KEYCLOAK_ADMIN: admin
@@ -67,7 +67,7 @@ services:
       # convenience) -- no `/auth` path: Keycloak 26 (Quarkus) drops the
       # legacy context path by default, and this matches what
       # jwt.strategy.ts / KEYCLOAK_ISSUER below actually validate against
-      # (see the plan's ADR-038 correction note).
+      # (see the plan's ADR-041 correction note).
       KC_HOSTNAME: ${KC_HOSTNAME}
       KC_HOSTNAME_STRICT: 'true'
       # Nginx (Sub-phase C) terminates TLS; Keycloak speaks plain HTTP

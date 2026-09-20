@@ -1,6 +1,6 @@
 #!/bin/bash
 # EC2 user-data -- host bootstrap for the compliance SaaS app instance.
-# Target: Amazon Linux 2023 (kernel 6.18), t3.micro (2 vCPU / 1 GiB). See ADR-038.
+# Target: Amazon Linux 2023 (kernel 6.18), t3.micro (2 vCPU / 1 GiB). See ADR-041.
 # Scope: host prep only (Docker + Compose plugin + swap). The application
 # stack (apps/api, apps/worker, Redis, Keycloak, Nginx) is deployed in a
 # later E7 phase, not here.
@@ -9,7 +9,7 @@ exec > >(tee /var/log/bootstrap.log) 2>&1
 echo "bootstrap start: $(date -u +%FT%TZ)"
 
 # --- 2 GB swapfile -------------------------------------------------------
-# 1 GiB RAM is tight for Keycloak's JVM + two Node procs + Redis (ADR-038).
+# 1 GiB RAM is tight for Keycloak's JVM + two Node procs + Redis (ADR-041).
 if [ ! -f /swapfile ]; then
   dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
   chmod 600 /swapfile

@@ -3,7 +3,7 @@
 Region: **eu-west-1** · Account: **218201720464** · Principal:
 `arn:aws:iam::218201720464:user/compliance-deploy` (not root)
 
-See **ADR-038** for the rationale behind every choice below.
+See **ADR-041** for the rationale behind every choice below.
 
 ---
 
@@ -84,7 +84,7 @@ passwords via `openssl rand -hex 20`. Created `2026-09-09`, tagged
 
 Naming note: the secrets were created **without** a leading slash --
 `compliance/prod/database`, not `/compliance/prod/database`. The IAM policy
-resource pattern (§4) and ADR-038's table are aligned to the created form:
+resource pattern (§4) and ADR-041's table are aligned to the created form:
 `arn:aws:secretsmanager:eu-west-1:218201720464:secret:compliance/prod/*`.
 A leading-slash pattern would NOT match these ARNs and the instance would
 get AccessDenied on every secret read.
@@ -136,7 +136,7 @@ aws iam add-role-to-instance-profile \
 ```
 
 The inline policy grants (least privilege -- NOT the prompt's broad managed
-policies; see ADR-038):
+policies; see ADR-041):
 - Secrets Manager **read** on `compliance/prod/*` + `kms:Decrypt` via
   Secrets Manager only
 - CloudWatch Logs **write** on `/compliance/*` only
@@ -174,7 +174,7 @@ aws rds create-db-instance \
   --tags Key=Name,Value=compliance-db Key=Project,Value=employee-compliance-saas Key=Epoch,Value=E7
 ```
 
-**Backup-retention deviation:** the plan (§ADR-038) calls for 7-day
+**Backup-retention deviation:** the plan (§ADR-041) calls for 7-day
 automated backups, but this account is on the AWS **Free Plan**, which
 rejects `--backup-retention-period 7`:
 
@@ -191,7 +191,7 @@ aws rds modify-db-instance --db-instance-identifier compliance-db \
   --backup-retention-period 7 --apply-immediately
 ```
 
-**Storage encryption** (`--storage-encrypted`) was added beyond §ADR-038's
+**Storage encryption** (`--storage-encrypted`) was added beyond §ADR-041's
 original text: it is immutable after creation and this is a compliance
 data store. `aws/rds` managed key, no extra cost.
 
