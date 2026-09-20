@@ -2032,3 +2032,75 @@ the operator creating `ec2-app-role` out of band. No CLAUDE.md Review Gate is
 tripped by the infrastructure itself; the RDS migration run is the existing
 reviewed migration set applied unchanged, not a new migration. This ADR is
 written before the RDS instance is created, per the E7 quality gate.
+
+## ADR-042: standalone fix -- 3 of E6's 5 O(n) read-path findings, via additive indexes
+
+Date: post-E7
+Status: ACCEPTED
+
+Context: E6 load testing (`docs/e6-results/E6_PERFORMANCE_REPORT.md`
+sections 6/8) found 5 read paths that scan/sort/recompute over a tenant's
+*entire* row set rather than using an index shaped for the query, causing
+sustainable throughput to drop ~1/n as tenant data grows. E6 was
+validation-only and E7 was infrastructure standup, so all 5 were carried
+forward untouched except backlog item 1 (`pool.on('error')`, ADR-037).
+This is standalone follow-up work, same treatment as ADR-037/038/039/040 --
+**not "E8"**: that name is reserved for first real pilot customer
+onboarding (`E7_GATE.md`'s `nextEpoch`, ADR-041), which hasn't started.
+
+Decision: close backlog items 2, 3, and 5 -- the three that are pure
+additive index migrations with zero application-code changes --
+in `packages/database/migrations/011_post_e7_read_path_indexes.sql`
+(mirrored to `infra/postgres/init/11_post_e7_read_path_indexes.sql` per the
+existing convention):
+
+1. `idx_documents_employee ON documents(employee_id) WHERE deleted_at IS NULL`
+   -- `GET /employees/:id/documents` (`documents.service.ts`'s
+   `findAllForEmployee()`) had no index on `employee_id` at all; every call
+   scanned the tenant's entire document set via `idx_documents_tenant` and
+   filtered in memory.
+2. `idx_employees_search_tenant`, a composite `btree_gin` index on
+   `(tenant_id, to_tsvector(...))`, replacing the plain-GIN
+   `idx_employees_search` (`006_employees_extended.sql`), which the planner
+   never chose once the RLS `tenant_id` predicate was added (0 `idx_scan`
+   across every E6 load run) -- folding `tenant_id` into the same index lets
+   one Index Scan satisfy both predicates. The old index is dropped: every
+   query is tenant-scoped via RLS, so it has no remaining legitimate use and
+   only costs write amplification.
+3. `idx_employees_list ON employees(tenant_id, created_at) WHERE deleted_at IS NULL`
+   -- `GET /employees?page=N` (`employees.service.ts`'s `findAll()`,
+   `.orderBy(employees.createdAt)`) heapsorted the tenant's whole active set
+   via `idx_employees_tenant`; this composite lets the RLS predicate and the
+   `ORDER BY` come from one index, no sort step.
+
+**Backlog item 4 (a `document_status_rollup` table for
+`dashboard/summary`/`document-stats`, O(n) -> O(1)) is explicitly
+deferred**, not folded into this fix. It needs the rollup kept in sync on
+every `documents` write, and `documents.service.ts`'s create/update/archive
+are not the only write path: `tools/seed/generate.ts` inserts into
+`documents` directly for synthetic load-test data, bypassing
+`DocumentsService` entirely. App-level increment/decrement at the service's
+3 call sites would silently drift out of sync exactly when seed data is
+loaded -- the 100K-500K scale scenario this whole backlog exists to serve.
+Fixing it needs a real design decision (a Postgres trigger -- a new pattern,
+this repo has none today -- vs. app-level plus a seed-time reconciliation
+step) that deserves its own review, not a rider on an otherwise
+zero-risk index migration. Confirmed with the user: ship items 2/3/5 now,
+decide item 4 separately.
+
+Also out of scope, unrelated to "the 5 O(n) read paths": backlog items 6-9
+(reminder-scan dedup batching, worker `IORedis`
+`.on('error')` log-noise cleanup, production monitors, managed
+backups/WAL/PITR) -- untouched.
+
+Consequences: query *results* are unchanged, only the plans Postgres
+chooses -- no RLS, grant, or application-code change, so no new
+unit/security/integration test coverage is required (consistent with prior
+pure-index migrations, e.g. `010_e4_failure_observability_index.sql`).
+E6's own load-test environment already proved the *shape* of each fix at
+100K-500K scale; this migration was verified structurally (applies cleanly,
+recorded in `schema_migrations` per ADR-038's tracking) rather than
+re-run against a representative dataset in this environment. Remaining open
+items after this fix: backlog item 4 (rollup, above), and the still
+live-untested SMTP delivery gap carried from E7 (`E7_GATE.md`'s
+`knownLimitations`).
