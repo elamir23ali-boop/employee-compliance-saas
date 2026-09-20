@@ -45,7 +45,7 @@ fi
 
 export AWS_DEFAULT_REGION=eu-west-1
 REGISTRY="218201720464.dkr.ecr.eu-west-1.amazonaws.com"
-TAG="693777a"
+TAG="db27752"
 REPO_RAW="https://raw.githubusercontent.com/elamir23ali-boop/employee-compliance-saas/e7/aws-deployment"
 COMPOSE_SHA256="782a1d1f341b97029b8ed0ef255b2d7c604ac896671eb8af26258d9d27b57afc"
 REALM_SHA256="090ee72359bf0af36edea968d93e0e3aa9c25d1f4cbb9591caea6f0077ac2455"
