@@ -5,7 +5,7 @@
 Security-first multi-tenant SaaS — employee document compliance for UAE companies.
 Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
 
-## Current Phase: E7 complete — AWS Production Infrastructure (Staging Deployment), plus four post-E7 standalone fixes merged the same day (pool.on('error') resilience, migration tracking, trust-proxy/audit-IP, dependency CVE remediation)
+## Current Phase: E7 complete — AWS Production Infrastructure (Staging Deployment), plus five post-E7 standalone fixes (pool.on('error') resilience, migration tracking, trust-proxy/audit-IP, dependency CVE remediation, and 3 of E6's 5 O(n) read-path indexes — see below). Not E8: that name is reserved for first real pilot customer onboarding (E7_GATE.md's nextEpoch, ADR-041), which hasn't started.
 
 - E0 complete: 19/19 security tests PASS (auth, RLS, RBAC, pooling baseline).
 - E1 established the repository structure, CI, and monorepo layout only.
@@ -229,9 +229,25 @@ Multi-tenant: Shared PostgreSQL + Row-Level Security (RLS).
   not a container address), and ADR-040 (4 newly-surfaced HIGH `npm
   audit` findings — multer/nodemailer/js-yaml — remediated). Both
   `compliance-api` and `compliance-worker` images were rebuilt from
-  `main` and redeployed to the live EC2 host to take effect. Still open:
-  a live SMTP delivery test against the real provider, and all 5 of E6's
-  O(n) read-path findings.
+  `main` and redeployed to the live EC2 host to take effect.
+
+  **A fifth post-E7 standalone fix closes 3 of E6's 5 O(n) read-path
+  findings**: `packages/database/migrations/011_post_e7_read_path_indexes.sql`
+  adds `idx_documents_employee` (fixes `GET /employees/:id/documents`),
+  a composite `btree_gin` `idx_employees_search_tenant` replacing the
+  never-chosen plain-GIN `idx_employees_search` (fixes `GET
+  /employees?q=`), and `idx_employees_list` on `(tenant_id, created_at)`
+  (fixes `GET /employees?page=N`'s sort). Purely additive: no RLS, grant,
+  or application-code change. See ADR-042. Backlog item 4 (a
+  `document_status_rollup` for `dashboard/summary`/`document-stats`) is
+  explicitly deferred — `tools/seed/generate.ts` inserts into `documents`
+  directly, bypassing `DocumentsService`, so app-level rollup maintenance
+  would silently drift during exactly the seed-scale scenario this backlog
+  targets; needs its own design decision (trigger vs. app-level).
+
+  Still open: a live SMTP delivery test against the real provider (blocked
+  on `compliance/prod/smtp` still holding `CHANGE_ME` placeholders — no
+  provider has been chosen yet), and backlog item 4 above.
 
 ## ABSOLUTE PROHIBITIONS
 
