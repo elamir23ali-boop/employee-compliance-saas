@@ -239,8 +239,15 @@ jobs:
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: main
-          head: HEAD
+          # On a direct push to main, `base: main` and `head: HEAD` resolve
+          # to the same commit (main IS HEAD), which trips TruffleHog's own
+          # "BASE and HEAD commits are the same" guard and fails every push
+          # to main. Only set base/head for pull_request, where the PR's
+          # base branch genuinely differs from its head; leaving both empty
+          # on push lets the action fall back to its own before/after-SHA
+          # diff logic, which is what it's designed for.
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          head: ${{ github.event_name == 'pull_request' && github.sha || '' }}
 
   build:
     needs: security-scan
